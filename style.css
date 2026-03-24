@@ -1,0 +1,52 @@
+body {
+  font-family: Arial;
+  padding: 20px;
+  background: #0f172a;
+  color: white;
+}
+
+.query span {
+  padding: 4px 6px;
+  margin: 2px;
+  border-radius: 4px;
+}
+
+.active {
+  background: #22c55e;
+  color: black;
+  font-weight: bold;
+}
+
+table {
+  border-collapse: collapse;
+  margin-top: 20px;
+  width: 100%;
+  background: #1e293b;
+}
+
+th,
+td {
+  border: 1px solid #334155;
+  padding: 8px;
+  text-align: left;
+}
+
+button {
+  margin-top: 15px;
+  padding: 10px 15px;
+  background: #38bdf8;
+  border: none;
+  cursor: pointer;
+  font-weight: bold;
+}
+
+.ram {
+  margin-top: 20px;
+  padding: 10px;
+  background: #020617;
+  border: 1px solid #334155;
+}
+
+.hidden {
+  display: none;
+}

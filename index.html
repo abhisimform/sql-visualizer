@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>SQL Execution Visualizer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+  <h2>🧠 SQL Execution Visualizer</h2>
+
+  <textarea id="queryInput" rows="4" style="width:100%;">
+    SELECT group, count(*) FROM data WHERE salary > 25000 GROUP BY city HAVING COUNT(*) >= 2 ORDER BY count DESC
+  </textarea>
+
+  <button onclick="startExecution()">Run Query ▶</button>
+
+  <div class="query" id="queryDisplay"></div>
+
+  <div style="margin-top: 10px;">
+    <button onclick="prevStep()">Previous Step</button>
+    <button onclick="nextStep()">Next Step</button>
+  </div>
+
+  <div class="ram">
+    <h3>🧠 RAM (Current Dataset)</h3>
+    <p id="rowCount"></p>
+    <table id="table"></table>
+  </div>
+
+  <script src="script.js"></script>
+
+</body>
+
+</html>
