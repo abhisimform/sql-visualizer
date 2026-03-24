@@ -1,37 +1,77 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SQL Execution Visualizer</title>
+  <script>
+    const savedTheme = localStorage.getItem("sql-visualizer-theme");
+    if (savedTheme === "light" || savedTheme === "dark") {
+      document.documentElement.dataset.theme = savedTheme;
+    }
+  </script>
   <link rel="stylesheet" href="style.css">
 </head>
 
 <body>
+  <main class="page-shell">
+    <section class="hero-card">
+      <div class="hero-topbar">
+        <div>
+          <p class="eyebrow">Interactive playground</p>
+          <h1>SQL Execution Visualizer</h1>
+          <p class="hero-copy">Step through how a simple SQL query transforms your dataset in memory.</p>
+        </div>
 
-  <h2>🧠 SQL Execution Visualizer</h2>
+        <button id="themeToggle" class="theme-toggle" type="button">
+          <span class="theme-toggle-mark" aria-hidden="true"></span>
+          <span id="themeLabel">Dark mode</span>
+        </button>
+      </div>
+    </section>
 
-  <textarea id="queryInput" rows="4" style="width:100%;">
-    SELECT group, count(*) FROM data WHERE salary > 25000 GROUP BY city HAVING COUNT(*) >= 2 ORDER BY count DESC
-  </textarea>
+    <section class="workspace-grid">
+      <section class="panel panel-editor">
+        <div class="panel-heading">
+          <h2>Query</h2>
+          <span class="panel-badge">Saved locally</span>
+        </div>
 
-  <button onclick="startExecution()">Run Query ▶</button>
+        <textarea id="queryInput" rows="5">SELECT group, count(*) FROM data WHERE salary > 25000 GROUP BY city HAVING COUNT(*) >= 2 ORDER BY count DESC</textarea>
 
-  <div class="query" id="queryDisplay"></div>
+        <div class="action-row">
+          <button id="runButton" class="button button-primary" type="button">Run Query</button>
+          <p id="stepLabel" class="step-label">Ready to execute.</p>
+        </div>
 
-  <div style="margin-top: 10px;">
-    <button onclick="prevStep()">Previous Step</button>
-    <button onclick="nextStep()">Next Step</button>
-  </div>
+        <div class="query-card">
+          <div class="panel-heading compact">
+            <h3>Execution order</h3>
+          </div>
+          <div class="query" id="queryDisplay"></div>
+        </div>
 
-  <div class="ram">
-    <h3>🧠 RAM (Current Dataset)</h3>
-    <p id="rowCount"></p>
-    <table id="table"></table>
-  </div>
+        <div class="nav-row">
+          <button id="prevButton" class="button button-secondary" type="button">Previous Step</button>
+          <button id="nextButton" class="button button-secondary" type="button">Next Step</button>
+        </div>
+      </section>
 
-  <script src="script.js"></script>
+      <section class="panel panel-results">
+        <div class="panel-heading">
+          <h2>Current Dataset</h2>
+          <span id="rowCount" class="panel-badge">Rows: 0</span>
+        </div>
 
+        <div class="table-shell">
+          <div id="table" class="table-host"></div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script type="module" src="js/main.js"></script>
 </body>
 
 </html>

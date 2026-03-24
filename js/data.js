@@ -1,0 +1,22 @@
+export const EMPLOYEE_DATA = [
+  { name: "Amit", age: 20, city: "Ahmedabad", salary: 25000, dept: "IT" },
+  { name: "Bhavya", age: 30, city: "Surat", salary: 40000, dept: "HR" },
+  { name: "Chirag", age: 40, city: "Ahmedabad", salary: 55000, dept: "IT" },
+  { name: "Dhruv", age: 22, city: "Vadodara", salary: 28000, dept: "Sales" },
+  { name: "Esha", age: 28, city: "Surat", salary: 35000, dept: "HR" },
+  { name: "Farhan", age: 35, city: "Ahmedabad", salary: 60000, dept: "Sales" },
+  { name: "Gauri", age: 26, city: "Rajkot", salary: 32000, dept: "IT" },
+  { name: "Harsh", age: 31, city: "Surat", salary: 45000, dept: "Sales" },
+  { name: "Isha", age: 29, city: "Rajkot", salary: 38000, dept: "HR" },
+  { name: "Jatin", age: 33, city: "Vadodara", salary: 42000, dept: "IT" },
+  { name: "Kavya", age: 24, city: "Surat", salary: 30000, dept: "Sales" },
+  { name: "Lalit", age: 37, city: "Rajkot", salary: 65000, dept: "HR" },
+  { name: "Meera", age: 27, city: "Vadodara", salary: 34000, dept: "IT" },
+  { name: "Nikhil", age: 32, city: "Surat", salary: 47000, dept: "Sales" },
+  { name: "Ojas", age: 23, city: "Ahmedabad", salary: 29000, dept: "IT" },
+  { name: "Priya", age: 36, city: "Vadodara", salary: 58000, dept: "HR" },
+  { name: "Rohan", age: 25, city: "Rajkot", salary: 31000, dept: "Sales" },
+  { name: "Sana", age: 34, city: "Ahmedabad", salary: 54000, dept: "IT" },
+  { name: "Tanish", age: 30, city: "Vadodara", salary: 40000, dept: "Sales" },
+  { name: "Usha", age: 28, city: "Rajkot", salary: 36000, dept: "HR" }
+];
