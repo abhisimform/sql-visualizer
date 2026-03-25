@@ -4,10 +4,9 @@ const PSEUDO_COLUMNS = new Set(["group", "groupkey", "count"]);
 
 export function validateQuery(ast, schema, options = {}) {
   const rawQuery = options.rawQuery || "";
-  const sampleRows = options.sampleRows || {};
+  const sampleRows = normalizeSampleRows(options.sampleRows || {});
   const errors = [];
 
-  // Structural validation keeps the execution pipeline from starting on malformed SQL.
   validateRequiredClauses(ast, rawQuery, errors);
   validateClauseOrder(rawQuery, errors);
 
@@ -15,9 +14,8 @@ export function validateQuery(ast, schema, options = {}) {
     return errors;
   }
 
-  const context = createValidationContext(ast, schema, sampleRows, rawQuery);
+  const context = createValidationContext(ast, schema, sampleRows, rawQuery, options.outerAliases || new Set());
 
-  // Semantic and logical validation runs on the existing AST without changing it.
   validateFromClause(context, errors);
   validateLimitOffset(ast, rawQuery, errors);
   validateHavingUsage(context, errors);
@@ -30,68 +28,75 @@ export function validateQuery(ast, schema, options = {}) {
 }
 
 export function createQueryError(type, message, location, suggestion = "") {
-  return {
-    type,
-    message,
-    location,
-    suggestion
-  };
+  return { type, message, location, suggestion };
 }
 
-function createValidationContext(ast, schema, sampleRows, rawQuery) {
-  const upperSchema = Object.entries(schema).reduce((accumulator, [table, columns]) => {
+function normalizeSampleRows(sampleRows) {
+  return Object.entries(sampleRows).reduce((accumulator, [table, row]) => {
+    accumulator[table.toUpperCase()] = row;
+    return accumulator;
+  }, {});
+}
+
+function createValidationContext(ast, schema, sampleRows, rawQuery, outerAliases) {
+  const normalizedSchema = Object.entries(schema).reduce((accumulator, [table, columns]) => {
     accumulator[table.toUpperCase()] = columns.map((column) => column.toLowerCase());
     return accumulator;
   }, {});
 
-  const fromStep = ast.find((step) => step.type === "FROM");
-  const tableName = fromStep?.value?.table?.toUpperCase() || "";
-  const fromAlias = fromStep?.value?.alias?.toLowerCase() || "";
-  const availableColumns = upperSchema[tableName] || [];
-  const sampleRow = sampleRows[tableName] || null;
-  const columnTypes = inferColumnTypes(availableColumns, sampleRow);
+  const sources = collectSources(ast).map((source) => ({
+    ...source,
+    tableName: source.table.toUpperCase(),
+    aliasName: source.alias.toLowerCase()
+  }));
+
   const groupByStep = ast.find((step) => step.type === "GROUP BY");
   const selectStep = ast.find((step) => step.type === "SELECT");
+  const aliases = new Set(outerAliases);
+
+  sources.forEach((source) => {
+    aliases.add(source.aliasName);
+    aliases.add(source.tableName.toLowerCase());
+  });
 
   return {
     ast,
     rawQuery,
-    schema: upperSchema,
-    tableName,
-    fromAlias,
-    availableColumns,
-    columnTypes,
+    schema: normalizedSchema,
+    sampleRows,
+    sources,
+    outerAliases: new Set(outerAliases),
+    availableAliases: aliases,
     groupExpressions: groupByStep ? groupByStep.value : [],
     selectExpressions: selectStep ? selectStep.value : [],
     selectAliases: new Set((selectStep ? selectStep.value : []).map((expression) => expression.alias).filter(Boolean))
   };
 }
 
-function inferColumnTypes(columns, sampleRow) {
-  return columns.reduce((accumulator, column) => {
-    const value = sampleRow ? sampleRow[column] : undefined;
-    accumulator[column] = typeof value === "number" ? "number" : typeof value === "string" ? "string" : "unknown";
-    return accumulator;
-  }, {});
+function collectSources(ast) {
+  const sources = [];
+  const fromStep = ast.find((step) => step.type === "FROM");
+  const baseSource = fromStep?.value?.source ? fromStep.value.source : fromStep?.value;
+  if (baseSource?.table) {
+    sources.push(baseSource);
+  }
+
+  ast.filter((step) => step.type === "JOIN").forEach((step) => {
+    if (step.value?.source?.table) {
+      sources.push(step.value.source);
+    }
+  });
+
+  return sources;
 }
 
 function validateRequiredClauses(ast, rawQuery, errors) {
   if (!ast.some((step) => step.type === "SELECT")) {
-    errors.push(createQueryError(
-      "SyntaxError",
-      "Missing SELECT clause",
-      findTokenLocation(rawQuery, "SELECT"),
-      "Start the query with SELECT ..."
-    ));
+    errors.push(createQueryError("SyntaxError", "Missing SELECT clause", findTokenLocation(rawQuery, "SELECT"), "Start the query with SELECT ..."));
   }
 
   if (!ast.some((step) => step.type === "FROM")) {
-    errors.push(createQueryError(
-      "SyntaxError",
-      "Missing FROM clause",
-      findTokenLocation(rawQuery, "FROM"),
-      "Add a FROM clause like FROM EMPLOYEE_DATA"
-    ));
+    errors.push(createQueryError("SyntaxError", "Missing FROM clause", findTokenLocation(rawQuery, "FROM"), "Add a FROM clause like FROM EMPLOYEE_DATA"));
   }
 }
 
@@ -121,18 +126,27 @@ function validateClauseOrder(rawQuery, errors) {
 }
 
 function validateFromClause(context, errors) {
-  if (!context.tableName) {
-    return;
-  }
+  context.sources.forEach((source) => {
+    if (!context.schema[source.tableName]) {
+      errors.push(createQueryError(
+        "SemanticError",
+        `Table '${source.tableName}' does not exist`,
+        findTokenLocation(context.rawQuery, source.tableName),
+        closestSuggestion(source.tableName.toLowerCase(), Object.keys(context.schema).map((name) => name.toLowerCase()), "Did you mean")
+      ));
+    }
+  });
 
-  if (!context.schema[context.tableName]) {
-    errors.push(createQueryError(
-      "SemanticError",
-      `Table '${context.tableName}' does not exist`,
-      findTokenLocation(context.rawQuery, context.tableName),
-      closestSuggestion(context.tableName.toLowerCase(), Object.keys(context.schema).map((name) => name.toLowerCase()), "Did you mean")
-    ));
-  }
+  context.ast.filter((step) => step.type === "JOIN").forEach((step) => {
+    if (step.value?.mode === "INNER" && (!step.value.condition || step.value.invalidCondition)) {
+      errors.push(createQueryError(
+        "LogicalError",
+        "Invalid JOIN condition",
+        findTokenLocation(context.rawQuery, "JOIN"),
+        "Use JOIN ... ON left_column = right_column"
+      ));
+    }
+  });
 }
 
 function validateLimitOffset(ast, rawQuery, errors) {
@@ -145,12 +159,7 @@ function validateLimitOffset(ast, rawQuery, errors) {
     const match = rawQuery.match(new RegExp(`${type}\\s+([^\\s;]+)`, "i"));
     const rawValue = match ? match[1] : String(step.value);
     if (!/^\d+$/.test(rawValue)) {
-      errors.push(createQueryError(
-        "TypeError",
-        `${type} expects a numeric value`,
-        findTokenLocation(rawQuery, rawValue),
-        `Use ${type} 10 style syntax`
-      ));
+      errors.push(createQueryError("TypeError", `${type} expects a numeric value`, findTokenLocation(rawQuery, rawValue), `Use ${type} 10 style syntax`));
     }
   });
 }
@@ -158,12 +167,7 @@ function validateLimitOffset(ast, rawQuery, errors) {
 function validateHavingUsage(context, errors) {
   const havingStep = context.ast.find((step) => step.type === "HAVING");
   if (havingStep && !context.groupExpressions.length) {
-    errors.push(createQueryError(
-      "LogicalError",
-      "HAVING cannot be used without GROUP BY",
-      findTokenLocation(context.rawQuery, "HAVING"),
-      "Add GROUP BY before HAVING or move the filter to WHERE"
-    ));
+    errors.push(createQueryError("LogicalError", "HAVING cannot be used without GROUP BY", findTokenLocation(context.rawQuery, "HAVING"), "Add GROUP BY before HAVING or move the filter to WHERE"));
   }
 }
 
@@ -177,12 +181,7 @@ function validateSelectAliases(context, errors) {
 
     const key = expression.alias.toLowerCase();
     if (aliases.has(key)) {
-      errors.push(createQueryError(
-        "SemanticError",
-        `Duplicate column alias '${expression.alias}'`,
-        findTokenLocation(context.rawQuery, expression.alias),
-        "Rename one of the selected aliases"
-      ));
+      errors.push(createQueryError("SemanticError", `Duplicate column alias '${expression.alias}'`, findTokenLocation(context.rawQuery, expression.alias), "Rename one of the selected aliases"));
       return;
     }
 
@@ -199,6 +198,14 @@ function validateExpressionsInAst(context, errors) {
 
     if (step.type === "WHERE" || step.type === "HAVING") {
       step.value.clauses.forEach((clause) => {
+        validateExpression(clause.left, context, errors, step.type);
+        validateExpression(clause.right, context, errors, step.type);
+      });
+      return;
+    }
+
+    if (step.type === "JOIN" && step.value?.condition) {
+      step.value.condition.clauses.forEach((clause) => {
         validateExpression(clause.left, context, errors, step.type);
         validateExpression(clause.right, context, errors, step.type);
       });
@@ -230,6 +237,9 @@ function validateExpression(expression, context, errors, stepType = "") {
       expression.values.forEach((value) => validateExpression(value, context, errors, stepType));
       return;
     case "literal":
+      if (expression.value === "*") {
+        return;
+      }
       detectInvalidFunctionLiteral(expression, context, errors);
       return;
     default:
@@ -242,11 +252,49 @@ function validateColumnReference(expression, context, errors, stepType) {
     return;
   }
 
-  if (expression.qualifier && expression.qualifier !== context.fromAlias && expression.qualifier !== context.tableName.toLowerCase()) {
+  const qualifier = expression.qualifier ? expression.qualifier.toLowerCase() : "";
+
+  if (qualifier) {
+    const matchedSource = context.sources.find((source) => source.aliasName === qualifier || source.tableName.toLowerCase() === qualifier);
+    if (!matchedSource) {
+      if (context.outerAliases.has(qualifier)) {
+        return;
+      }
+
+      errors.push(createQueryError(
+        "SemanticError",
+        `Alias '${qualifier}' not found`,
+        findTokenLocation(context.rawQuery, qualifier),
+        "Use a valid table alias from the FROM or JOIN clause"
+      ));
+      return;
+    }
+
+    const columns = context.schema[matchedSource.tableName] || [];
+    if (!columns.includes(expression.name)) {
+      errors.push(createQueryError(
+        "SemanticError",
+        `Column '${expression.name}' does not exist in table '${qualifier}'`,
+        findTokenLocation(context.rawQuery, expression.raw || expression.name),
+        closestSuggestion(expression.name, columns, "Did you mean")
+      ));
+    }
     return;
   }
 
-  if (context.availableColumns.includes(expression.name)) {
+  const matchedSources = context.sources.filter((source) => (context.schema[source.tableName] || []).includes(expression.name));
+
+  if (matchedSources.length === 1) {
+    return;
+  }
+
+  if (matchedSources.length > 1) {
+    errors.push(createQueryError(
+      "SemanticError",
+      `Column '${expression.name}' is ambiguous`,
+      findTokenLocation(context.rawQuery, expression.name),
+      "Prefix the column with a table alias"
+    ));
     return;
   }
 
@@ -254,41 +302,31 @@ function validateColumnReference(expression, context, errors, stepType) {
     return;
   }
 
+  const allColumns = Array.from(new Set(context.sources.flatMap((source) => context.schema[source.tableName] || [])));
   errors.push(createQueryError(
     "SemanticError",
     `Column '${expression.name}' does not exist`,
     findTokenLocation(context.rawQuery, expression.raw || expression.name),
-    closestSuggestion(expression.name, context.availableColumns, "Did you mean")
+    closestSuggestion(expression.name, allColumns, "Did you mean")
   ));
 }
 
 function validateAggregateFunction(expression, context, errors) {
   if (!BUILT_IN_FUNCTIONS.has(expression.fn)) {
-    errors.push(createQueryError(
-      "LogicalError",
-      `Invalid function name '${expression.fn}'`,
-      findTokenLocation(context.rawQuery, expression.fn),
-      "Use one of COUNT, AVG, SUM, MAX, MIN"
-    ));
+    errors.push(createQueryError("LogicalError", `Invalid function name '${expression.fn}'`, findTokenLocation(context.rawQuery, expression.fn), "Use one of COUNT, AVG, SUM, MAX, MIN"));
   }
 }
 
 function validateSubquery(expression, context, errors) {
   const subqueryErrors = validateQuery(expression.query, context.schema, {
     rawQuery: expression.raw,
-    sampleRows: context.tableName ? { [context.tableName]: buildSampleRow(context) } : {}
+    sampleRows: context.sampleRows,
+    outerAliases: context.availableAliases
   });
 
   if (subqueryErrors.length) {
     errors.push(subqueryErrors[0]);
   }
-}
-
-function buildSampleRow(context) {
-  return Object.entries(context.columnTypes).reduce((accumulator, [column, type]) => {
-    accumulator[column] = type === "number" ? 0 : "";
-    return accumulator;
-  }, {});
 }
 
 function detectInvalidFunctionLiteral(expression, context, errors) {
@@ -302,17 +340,12 @@ function detectInvalidFunctionLiteral(expression, context, errors) {
     return;
   }
 
-  errors.push(createQueryError(
-    "LogicalError",
-    `Invalid function name '${match[1]}'`,
-    findTokenLocation(context.rawQuery, match[1]),
-    "Use one of COUNT, AVG, SUM, MAX, MIN"
-  ));
+  errors.push(createQueryError("LogicalError", `Invalid function name '${match[1]}'`, findTokenLocation(context.rawQuery, match[1]), "Use one of COUNT, AVG, SUM, MAX, MIN"));
 }
 
 function validateAggregateUsage(context, errors) {
   const hasAggregate = context.selectExpressions.some((expression) => containsAggregate(expression));
-  const nonAggregateColumns = context.selectExpressions.filter((expression) => !containsAggregate(expression));
+  const nonAggregateColumns = context.selectExpressions.filter((expression) => !containsAggregate(expression) && !(expression.kind === "literal" && expression.value === "*"));
 
   if (hasAggregate && !context.groupExpressions.length && nonAggregateColumns.length) {
     const expression = nonAggregateColumns[0];
@@ -346,9 +379,10 @@ function validateAggregateUsage(context, errors) {
 
 function validateTypeComparisons(context, errors) {
   context.ast
-    .filter((step) => step.type === "WHERE" || step.type === "HAVING")
+    .filter((step) => step.type === "WHERE" || step.type === "HAVING" || step.type === "JOIN")
     .forEach((step) => {
-      step.value.clauses.forEach((clause) => {
+      const clauses = step.type === "JOIN" ? step.value?.condition?.clauses || [] : step.value.clauses;
+      clauses.forEach((clause) => {
         const leftType = inferExpressionType(clause.left, context);
         const rightType = inferExpressionType(clause.right, context);
 
@@ -356,12 +390,7 @@ function validateTypeComparisons(context, errors) {
           return;
         }
 
-        errors.push(createQueryError(
-          "TypeError",
-          `Cannot compare ${leftType} with ${rightType}`,
-          findTokenLocation(context.rawQuery, clause.operator),
-          "Use compatible types on both sides of the comparison"
-        ));
+        errors.push(createQueryError("TypeError", `Cannot compare ${leftType} with ${rightType}`, findTokenLocation(context.rawQuery, clause.operator), "Use compatible types on both sides of the comparison"));
       });
     });
 }
@@ -374,8 +403,16 @@ function inferExpressionType(expression, context) {
   switch (expression.kind) {
     case "literal":
       return typeof expression.value === "number" ? "number" : typeof expression.value === "string" ? "string" : "unknown";
-    case "column":
-      return context.columnTypes[expression.name] || "unknown";
+    case "column": {
+      const qualifier = expression.qualifier ? expression.qualifier.toLowerCase() : "";
+      if (qualifier) {
+        const matchedSource = context.sources.find((source) => source.aliasName === qualifier || source.tableName.toLowerCase() === qualifier);
+        return matchedSource ? inferColumnType(matchedSource, expression.name, context) : "unknown";
+      }
+
+      const matchedSource = context.sources.find((source) => (context.schema[source.tableName] || []).includes(expression.name));
+      return matchedSource ? inferColumnType(matchedSource, expression.name, context) : "unknown";
+    }
     case "aggregate":
     case "binary":
       return "number";
@@ -390,6 +427,12 @@ function inferExpressionType(expression, context) {
     default:
       return "unknown";
   }
+}
+
+function inferColumnType(source, columnName, context) {
+  const sampleRow = context.sampleRows[source.tableName] || {};
+  const value = sampleRow[columnName];
+  return typeof value === "number" ? "number" : typeof value === "string" ? "string" : "unknown";
 }
 
 function containsAggregate(expression) {
@@ -414,7 +457,7 @@ function getExpressionLabel(expression) {
   }
 
   if (expression.kind === "column") {
-    return expression.name;
+    return expression.qualifier ? `${expression.qualifier}.${expression.name}` : expression.name;
   }
 
   return expression.raw;
@@ -450,11 +493,7 @@ function levenshtein(left, right) {
   for (let row = 1; row <= left.length; row += 1) {
     for (let column = 1; column <= right.length; column += 1) {
       const cost = left[row - 1] === right[column - 1] ? 0 : 1;
-      matrix[row][column] = Math.min(
-        matrix[row - 1][column] + 1,
-        matrix[row][column - 1] + 1,
-        matrix[row - 1][column - 1] + cost
-      );
+      matrix[row][column] = Math.min(matrix[row - 1][column] + 1, matrix[row][column - 1] + 1, matrix[row - 1][column - 1] + cost);
     }
   }
 
@@ -469,10 +508,7 @@ function findTokenLocation(query, token) {
 function toLocation(query, index) {
   const safeIndex = Math.max(0, index);
   const lines = query.slice(0, safeIndex).split("\n");
-  return {
-    line: lines.length,
-    column: lines.at(-1).length + 1
-  };
+  return { line: lines.length, column: lines.at(-1).length + 1 };
 }
 
 function findTopLevelKeyword(query, keyword) {

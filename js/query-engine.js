@@ -1,8 +1,11 @@
+import { QueryParser } from "./query-parser.js";
+
 export class QueryEngine {
   constructor(sourceData) {
     this.sourceData = sourceData;
     this.lastError = null;
     this.queryContext = "";
+    this.parser = new QueryParser();
   }
 
   setQueryContext(query) {
@@ -39,6 +42,134 @@ export class QueryEngine {
     };
   }
 
+  expandExecutionSteps(steps) {
+    const fromIndex = steps.findIndex((step) => step.type === "FROM");
+    if (fromIndex === -1) {
+      return steps;
+    }
+
+    const fromStep = steps[fromIndex];
+    const sources = this.parseFromSources(fromStep.value?.raw || fromStep.value?.table || "");
+    if (!sources.length) {
+      return steps;
+    }
+
+    const expandedSteps = [...steps];
+    expandedSteps[fromIndex] = { type: "FROM", value: sources[0].source };
+
+    const joinSteps = sources.slice(1).map((source) => ({
+      type: "JOIN",
+      value: source
+    }));
+
+    expandedSteps.splice(fromIndex + 1, 0, ...joinSteps);
+    return expandedSteps;
+  }
+
+  parseFromSources(rawFrom) {
+    const normalized = String(rawFrom || "").trim();
+    if (!normalized) {
+      return [];
+    }
+
+    if (/\bJOIN\b/i.test(normalized)) {
+      return this.parseJoinSources(normalized);
+    }
+
+    return this.splitTopLevel(normalized, ",").map((part, index) => ({
+      source: this.parseSourceSpec(part),
+      mode: index === 0 ? "BASE" : "CROSS",
+      condition: null,
+      raw: part.trim()
+    }));
+  }
+
+  parseJoinSources(rawFrom) {
+    const sources = [];
+    const upper = rawFrom.toUpperCase();
+    const firstJoinIndex = upper.indexOf(" JOIN ");
+
+    if (firstJoinIndex === -1) {
+      return [{ source: this.parseSourceSpec(rawFrom), mode: "BASE", condition: null, raw: rawFrom.trim() }];
+    }
+
+    const basePart = rawFrom.slice(0, firstJoinIndex).trim();
+    sources.push({ source: this.parseSourceSpec(basePart), mode: "BASE", condition: null, raw: basePart });
+
+    let cursor = firstJoinIndex + 6;
+    while (cursor < rawFrom.length) {
+      const nextJoinIndex = this.findKeyword(rawFrom, " JOIN ", cursor);
+      const segment = rawFrom.slice(cursor, nextJoinIndex === -1 ? rawFrom.length : nextJoinIndex).trim();
+      const onIndex = segment.toUpperCase().indexOf(" ON ");
+      const sourcePart = onIndex === -1 ? segment : segment.slice(0, onIndex).trim();
+      const conditionPart = onIndex === -1 ? "" : segment.slice(onIndex + 4).trim();
+
+      sources.push({
+        source: this.parseSourceSpec(sourcePart),
+        mode: "INNER",
+        condition: conditionPart ? this.parser.parseCondition(conditionPart) : null,
+        raw: segment,
+        invalidCondition: !conditionPart
+      });
+
+      if (nextJoinIndex === -1) {
+        break;
+      }
+
+      cursor = nextJoinIndex + 6;
+    }
+
+    return sources;
+  }
+
+  parseSourceSpec(expression) {
+    const match = expression.trim().match(/^([a-zA-Z_][\w]*)(?:\s+(?:AS\s+)?([a-zA-Z_][\w]*))?$/i);
+    const table = match ? match[1].toLowerCase() : expression.trim().toLowerCase();
+    const alias = match && match[2] ? match[2].toLowerCase() : table;
+
+    return {
+      raw: expression.trim(),
+      table,
+      alias
+    };
+  }
+
+  splitTopLevel(value, separator) {
+    const parts = [];
+    let depth = 0;
+    let current = "";
+
+    for (let index = 0; index < value.length; index += 1) {
+      const char = value[index];
+
+      if (char === "(") {
+        depth += 1;
+      } else if (char === ")") {
+        depth = Math.max(0, depth - 1);
+      }
+
+      if (char === separator && depth === 0) {
+        if (current.trim()) {
+          parts.push(current.trim());
+        }
+        current = "";
+        continue;
+      }
+
+      current += char;
+    }
+
+    if (current.trim()) {
+      parts.push(current.trim());
+    }
+
+    return parts;
+  }
+
+  findKeyword(query, keyword, startIndex = 0) {
+    return query.toUpperCase().indexOf(keyword.trim().toUpperCase(), startIndex);
+  }
+
   executeStep(dataset, step, scopes = []) {
     if (this.lastError) {
       return dataset;
@@ -48,6 +179,8 @@ export class QueryEngine {
       switch (step.type) {
         case "FROM":
           return this.getSourceRows(step.value);
+        case "JOIN":
+          return this.joinRows(dataset, step.value);
         case "WHERE":
           return dataset.filter((row) => this.matchesCondition(row, step.value, [row, ...scopes]));
         case "GROUP BY":
@@ -93,47 +226,132 @@ export class QueryEngine {
   getSourceRows(fromClause) {
     const tableName = (fromClause?.table || fromClause || "").toString().trim().replace(/;$/, "").toLowerCase();
     const alias = (fromClause?.alias || tableName || "data").toLowerCase();
-    const supportedTables = new Set(["employee_data", "data", "employees"]);
+    const resolvedTableName = tableName || "employee_data";
+    const dataset = this.resolveTableRows(resolvedTableName);
 
-    if (!tableName || supportedTables.has(tableName)) {
-      return this.sourceData.map((row) => this.createScopedRow(row, tableName || "employee_data", alias));
+    if (!dataset) {
+      this.setError(this.createError(
+        "SemanticError",
+        `Table '${resolvedTableName.toUpperCase()}' does not exist`,
+        resolvedTableName,
+        "Use one of the available tables from the database schema"
+      ));
+      return [];
     }
 
-    return this.sourceData.map((row) => this.createScopedRow(row, tableName, alias));
+    return dataset.map((row) => this.createScopedRow(row, resolvedTableName, alias));
+  }
+
+  resolveTableRows(tableName) {
+    const normalizedName = String(tableName || "").toLowerCase();
+    const exactKey = Object.keys(this.sourceData || {}).find((key) => key.toLowerCase() === normalizedName);
+    return exactKey ? this.sourceData[exactKey] : null;
   }
 
   createScopedRow(row, tableName, alias) {
     const scopedRow = { ...row };
     const bindings = {
-      [tableName]: scopedRow,
-      [alias]: scopedRow
+      [alias]: scopedRow,
+      [tableName]: scopedRow
     };
 
     this.attachMeta(scopedRow, {
-      tableName,
-      alias,
-      bindings
+      bindings,
+      displayBindings: {
+        [alias]: scopedRow
+      }
     });
 
     return scopedRow;
   }
 
-  cloneRows(rows) {
-    return rows.map((row) => this.cloneRow(row));
+  joinRows(leftRows, joinStep) {
+    const rightRows = this.getSourceRows(joinStep.source);
+    if (this.lastError) {
+      return [];
+    }
+
+    if (joinStep.mode === "INNER" && (!joinStep.condition || joinStep.invalidCondition)) {
+      this.setError(this.createError(
+        "LogicalError",
+        "Invalid JOIN condition",
+        joinStep.raw,
+        "Use JOIN ... ON left_column = right_column"
+      ));
+      return [];
+    }
+
+    const joined = [];
+
+    leftRows.forEach((leftRow) => {
+      rightRows.forEach((rightRow) => {
+        const mergedRow = this.mergeRows(leftRow, rightRow);
+        if (joinStep.mode === "INNER") {
+          if (this.matchesCondition(mergedRow, joinStep.condition, [mergedRow])) {
+            joined.push(mergedRow);
+          }
+          return;
+        }
+
+        joined.push(mergedRow);
+      });
+    });
+
+    return joined;
+  }
+
+  mergeRows(leftRow, rightRow) {
+    const leftMeta = this.getMeta(leftRow);
+    const rightMeta = this.getMeta(rightRow);
+    const mergedRow = {};
+    const displayBindings = {
+      ...(leftMeta?.displayBindings || {}),
+      ...(rightMeta?.displayBindings || {})
+    };
+    const bindings = {
+      ...(leftMeta?.bindings || {}),
+      ...(rightMeta?.bindings || {})
+    };
+
+    Object.entries(displayBindings).forEach(([alias, row]) => {
+      Object.keys(row).forEach((column) => {
+        if (column.includes(".")) {
+          return;
+        }
+        mergedRow[`${alias}.${column}`] = row[column];
+      });
+    });
+
+    this.attachMeta(mergedRow, { bindings, displayBindings });
+    return mergedRow;
   }
 
   cloneRow(row) {
     const cloned = { ...row };
     const meta = this.getMeta(row);
-    if (meta) {
-      this.attachMeta(cloned, {
-        ...meta,
-        bindings: Object.keys(meta.bindings || {}).reduce((accumulator, key) => {
-          accumulator[key] = cloned;
-          return accumulator;
-        }, {})
-      });
+    if (!meta) {
+      return cloned;
     }
+
+    const rowMap = new Map();
+    const cloneBoundRow = (boundRow) => {
+      if (!rowMap.has(boundRow)) {
+        rowMap.set(boundRow, { ...boundRow });
+      }
+      return rowMap.get(boundRow);
+    };
+
+    const bindings = Object.entries(meta.bindings || {}).reduce((accumulator, [key, value]) => {
+      accumulator[key] = cloneBoundRow(value);
+      return accumulator;
+    }, {});
+
+    const displayBindings = Object.entries(meta.displayBindings || {}).reduce((accumulator, [key, value]) => {
+      accumulator[key] = cloneBoundRow(value);
+      return accumulator;
+    }, {});
+
+    this.attachMeta(cloned, { bindings, displayBindings });
     return cloned;
   }
 
@@ -191,6 +409,10 @@ export class QueryEngine {
       return [];
     }
 
+    if (this.isSelectAll(columns)) {
+      return dataset.map((row) => this.expandSelectAll(row));
+    }
+
     if (this.isGrouped(dataset)) {
       return dataset.map((group) => this.buildSelectedRow(group, columns, scopes));
     }
@@ -200,6 +422,22 @@ export class QueryEngine {
     }
 
     return dataset.map((row) => this.buildSelectedRow(row, columns, scopes));
+  }
+
+  isSelectAll(columns) {
+    return columns.length === 1 && columns[0].kind === "literal" && columns[0].value === "*";
+  }
+
+  expandSelectAll(row) {
+    const meta = this.getMeta(row);
+    if (!meta?.displayBindings || Object.keys(meta.displayBindings).length <= 1) {
+      return { ...row };
+    }
+
+    return Object.keys(row).reduce((accumulator, key) => {
+      accumulator[key] = row[key];
+      return accumulator;
+    }, {});
   }
 
   buildSelectedRow(source, columns, scopes) {
@@ -229,8 +467,8 @@ export class QueryEngine {
 
     const argumentName = aggregate.argument.name;
     const sortedRows = [...source.rows].sort((left, right) => {
-      const leftValue = left[argumentName];
-      const rightValue = right[argumentName];
+      const leftValue = this.resolveColumnValue(left, aggregate.argument, [left]);
+      const rightValue = this.resolveColumnValue(right, aggregate.argument, [right]);
       return aggregate.fn === "MAX" ? rightValue - leftValue : leftValue - rightValue;
     });
 
@@ -305,13 +543,44 @@ export class QueryEngine {
       }
 
       const meta = this.getMeta(scope);
-      if (expression.qualifier && meta?.bindings?.[expression.qualifier]) {
-        return meta.bindings[expression.qualifier][expression.name];
+      if (expression.qualifier) {
+        if (meta?.bindings?.[expression.qualifier]) {
+          return meta.bindings[expression.qualifier][expression.name];
+        }
+        continue;
       }
 
-      if (!expression.qualifier && expression.name in scope) {
+      if (expression.name in scope) {
         return scope[expression.name];
       }
+
+      if (meta?.displayBindings) {
+        const matches = Object.values(meta.displayBindings).filter((row) => expression.name in row);
+        const uniqueMatches = Array.from(new Set(matches));
+
+        if (uniqueMatches.length === 1) {
+          return uniqueMatches[0][expression.name];
+        }
+
+        if (uniqueMatches.length > 1) {
+          this.setError(this.createError(
+            "SemanticError",
+            `Column '${expression.name}' is ambiguous`,
+            expression.name,
+            "Prefix the column with a table alias"
+          ));
+          return undefined;
+        }
+      }
+    }
+
+    if (expression.qualifier) {
+      this.setError(this.createError(
+        "SemanticError",
+        `Alias '${expression.qualifier}' not found`,
+        expression.qualifier,
+        "Use a valid table alias from the FROM or JOIN clause"
+      ));
     }
 
     return undefined;
@@ -346,7 +615,7 @@ export class QueryEngine {
   }
 
   resolveSubquery(expression, scopes, asSet) {
-    const result = this.executeQuery(expression.query, scopes);
+    const result = this.executeQuery(this.expandExecutionSteps(expression.query), scopes);
     if (this.lastError) {
       return asSet ? [] : undefined;
     }
@@ -425,8 +694,8 @@ export class QueryEngine {
       return row[label];
     }
 
-    if (order.kind === "column" && order.name in row) {
-      return row[order.name];
+    if (order.kind === "column") {
+      return this.resolveColumnValue(row, order, [row]);
     }
 
     return undefined;

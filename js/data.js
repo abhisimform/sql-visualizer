@@ -1,4 +1,4 @@
-export const EMPLOYEE_DATA = [
+export const EMPLOYEES = [
   { name: "Amit", age: 20, city: "Ahmedabad", salary: 25000, dept: "IT" },
   { name: "Bhavya", age: 30, city: "Surat", salary: 40000, dept: "HR" },
   { name: "Chirag", age: 40, city: "Ahmedabad", salary: 55000, dept: "IT" },
@@ -21,6 +21,30 @@ export const EMPLOYEE_DATA = [
   { name: "Usha", age: 28, city: "Rajkot", salary: 36000, dept: "HR" }
 ];
 
+export const PRODUCTS = [
+  { id: 1, name: "Laptop", price: 72000, category: "Electronics" },
+  { id: 2, name: "Desk Chair", price: 8500, category: "Furniture" },
+  { id: 3, name: "Headphones", price: 3200, category: "Electronics" },
+  { id: 4, name: "Notebook", price: 120, category: "Stationery" },
+  { id: 5, name: "Coffee Mug", price: 450, category: "Kitchen" }
+];
+
+export const ORDERS = [
+  { id: 1, product_id: 1, quantity: 2 },
+  { id: 2, product_id: 3, quantity: 4 },
+  { id: 3, product_id: 2, quantity: 1 },
+  { id: 4, product_id: 5, quantity: 6 },
+  { id: 5, product_id: 4, quantity: 10 }
+];
+
+export const DATABASE = {
+  EMPLOYEES,
+  PRODUCTS,
+  ORDERS
+};
+
 export const QUERY_SCHEMA = {
-  EMPLOYEE_DATA: ["name", "age", "city", "salary", "dept"]
+  EMPLOYEES: ["name", "age", "city", "salary", "dept"],
+  PRODUCTS: ["id", "name", "price", "category"],
+  ORDERS: ["id", "product_id", "quantity"]
 };

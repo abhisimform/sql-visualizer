@@ -1,4 +1,4 @@
-import { EMPLOYEE_DATA, QUERY_SCHEMA } from "./data.js";
+import { DATABASE, QUERY_SCHEMA } from "./data.js";
 import { KEYWORDS, STEP_TO_KEYWORD_ID } from "./constants.js";
 import { queryStorage, ThemeStore } from "./storage.js";
 import { QueryParser } from "./query-parser.js";
@@ -22,7 +22,7 @@ export class QueryVisualizerApp {
     };
 
     this.parser = new QueryParser();
-    this.engine = new QueryEngine(EMPLOYEE_DATA);
+    this.engine = new QueryEngine(DATABASE);
     this.renderer = new TableRenderer(this.elements);
     this.themeStore = new ThemeStore();
     this.steps = [];
@@ -66,7 +66,7 @@ export class QueryVisualizerApp {
     this.queryError = null;
 
     try {
-      this.steps = this.parser.parse(query);
+      this.steps = this.engine.expandExecutionSteps(this.parser.parse(query));
     } catch (error) {
       this.steps = [];
       this.queryError = this.createAppError(
@@ -80,7 +80,7 @@ export class QueryVisualizerApp {
     if (!this.queryError) {
       const errors = validateQuery(this.steps, QUERY_SCHEMA, {
         rawQuery: query,
-        sampleRows: { EMPLOYEE_DATA: EMPLOYEE_DATA[0] }
+        sampleRows: Object.fromEntries(Object.entries(DATABASE).map(([tableName, rows]) => [tableName, rows[0] || null]))
       });
 
       if (errors.length) {
