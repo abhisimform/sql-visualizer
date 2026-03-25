@@ -61,7 +61,16 @@
       <section class="panel panel-results">
         <div class="panel-heading">
           <h2>Current Dataset</h2>
-          <span id="rowCount" class="panel-badge">Rows: 0</span>
+          <div class="results-tools">
+            <span id="rowCount" class="panel-badge">Rows: 0</span>
+            <button id="copyDataButton" class="button button-secondary button-copy" type="button" aria-label="Copy current table data" title="Copy current table data">
+              <span class="button-copy-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <path d="M9 9a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-7a2 2 0 0 1-2-2V9Zm-4 6V6a2 2 0 0 1 2-2h7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </span>
+            </button>
+          </div>
         </div>
 
         <div class="table-shell">

@@ -2,10 +2,20 @@ export class TableRenderer {
   constructor(elements) {
     this.host = elements.table;
     this.rowCount = elements.rowCount;
+    this.copyButton = elements.copyDataButton;
+    this.currentDataset = [];
+    this.copyResetTimer = null;
+
+    if (this.copyButton) {
+      this.copyButton.addEventListener("click", () => this.copyCurrentData());
+      this.syncCopyButton();
+    }
   }
 
   render(dataset) {
     this.host.innerHTML = "";
+    this.currentDataset = Array.isArray(dataset) ? dataset : [];
+    this.syncCopyButton();
 
     if (!dataset.length) {
       this.rowCount.textContent = "Rows: 0";
@@ -29,6 +39,8 @@ export class TableRenderer {
 
   renderError(error) {
     this.host.innerHTML = "";
+    this.currentDataset = [];
+    this.syncCopyButton();
     this.rowCount.textContent = "Error";
 
     const suggestion = error.suggestion ? `<p>${error.suggestion}</p>` : "";
@@ -129,5 +141,113 @@ export class TableRenderer {
 
   isGrouped(dataset) {
     return Boolean(dataset[0] && Array.isArray(dataset[0].rows));
+  }
+
+  syncCopyButton() {
+    if (!this.copyButton) {
+      return;
+    }
+
+    this.copyButton.disabled = !this.currentDataset.length;
+    this.copyButton.classList.remove("is-copied");
+    this.copyButton.setAttribute("aria-label", "Copy current table data");
+    this.copyButton.setAttribute("title", this.currentDataset.length ? "Copy current table data" : "No data to copy");
+  }
+
+  async copyCurrentData() {
+    if (!this.currentDataset.length) {
+      return;
+    }
+
+    const payload = this.formatDatasetForCopy(this.currentDataset);
+
+    try {
+      await navigator.clipboard.writeText(payload);
+      this.showCopyState();
+    } catch (error) {
+      this.fallbackCopy(payload);
+      this.showCopyState();
+    }
+  }
+
+  fallbackCopy(payload) {
+    const helper = document.createElement("textarea");
+    helper.value = payload;
+    helper.setAttribute("readonly", "true");
+    helper.style.position = "fixed";
+    helper.style.opacity = "0";
+    helper.style.pointerEvents = "none";
+    document.body.appendChild(helper);
+    helper.select();
+    document.execCommand("copy");
+    document.body.removeChild(helper);
+  }
+
+  showCopyState() {
+    if (!this.copyButton) {
+      return;
+    }
+
+    window.clearTimeout(this.copyResetTimer);
+    this.copyButton.classList.add("is-copied");
+    this.copyButton.setAttribute("aria-label", "Copied current table data");
+    this.copyButton.setAttribute("title", "Copied current table data");
+    this.copyResetTimer = window.setTimeout(() => {
+      this.copyButton.classList.remove("is-copied");
+      this.copyButton.setAttribute("aria-label", "Copy current table data");
+      this.copyButton.setAttribute("title", "Copy current table data");
+    }, 1400);
+  }
+
+  formatDatasetForCopy(dataset) {
+    if (this.isGrouped(dataset)) {
+      return dataset
+        .map((group) => `{
+  groupKey: ${this.formatValue(group.groupKey)},
+  count: ${this.formatValue(group.count)},
+  rows: ${this.formatArray(group.rows, 2)}
+}`)
+        .join(",\n");
+    }
+
+    return this.formatArray(dataset, 0);
+  }
+
+  formatArray(values, indentLevel) {
+    const indent = "  ".repeat(indentLevel);
+    const innerIndent = "  ".repeat(indentLevel + 1);
+    const rows = values.map((value) => `${innerIndent}${this.formatValue(value, indentLevel + 1)}`);
+
+    return `[
+${rows.join(",\n")}
+${indent}]`;
+  }
+
+  formatValue(value, indentLevel = 0) {
+    if (Array.isArray(value)) {
+      return this.formatArray(value, indentLevel);
+    }
+
+    if (value && typeof value === "object") {
+      const indent = "  ".repeat(indentLevel);
+      const innerIndent = "  ".repeat(indentLevel + 1);
+      const entries = Object.entries(value).map(
+        ([key, entryValue]) => `${innerIndent}${key}: ${this.formatValue(entryValue, indentLevel + 1)}`
+      );
+
+      return `{
+${entries.join(",\n")}
+${indent}}`;
+    }
+
+    if (typeof value === "string") {
+      return JSON.stringify(value);
+    }
+
+    if (value === undefined) {
+      return "undefined";
+    }
+
+    return String(value);
   }
 }

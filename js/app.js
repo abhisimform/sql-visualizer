@@ -1,5 +1,5 @@
 import { DATABASE, QUERY_SCHEMA } from "./data.js";
-import { KEYWORDS, STEP_TO_KEYWORD_ID } from "./constants.js";
+import { KEYWORDS } from "./constants.js";
 import { queryStorage, ThemeStore } from "./storage.js";
 import { QueryParser } from "./query-parser.js";
 import { QueryEngine } from "./query-engine.js";
@@ -16,6 +16,7 @@ export class QueryVisualizerApp {
       nextButton: document.getElementById("nextButton"),
       stepLabel: document.getElementById("stepLabel"),
       rowCount: document.getElementById("rowCount"),
+      copyDataButton: document.getElementById("copyDataButton"),
       table: document.getElementById("table"),
       themeToggle: document.getElementById("themeToggle"),
       themeLabel: document.getElementById("themeLabel")
@@ -122,7 +123,7 @@ export class QueryVisualizerApp {
       return;
     }
 
-    this.highlightStep(step.type);
+    this.highlightStep(step.type, this.stepIndex);
     this.stepIndex += 1;
     this.renderer.render(this.currentData);
     this.updateStepLabel(step.type);
@@ -152,9 +153,10 @@ export class QueryVisualizerApp {
       this.stepIndex += 1;
     }
 
-    const activeType = targetIndex > 0 ? this.steps[targetIndex - 1].type : "";
+    const activeIndex = targetIndex - 1;
+    const activeType = activeIndex >= 0 ? this.steps[activeIndex].type : "";
     if (activeType) {
-      this.highlightStep(activeType);
+      this.highlightStep(activeType, activeIndex);
     }
 
     this.renderer.render(this.currentData);
@@ -163,14 +165,20 @@ export class QueryVisualizerApp {
   }
 
   renderQuery(query, error = null) {
-    let formattedQuery = query;
+    const keywordPattern = KEYWORDS
+      .slice()
+      .sort((left, right) => right.length - left.length)
+      .map((keyword) => keyword.replace(/\s+/g, "\\s+"))
+      .join("|");
+    const keywordRegex = new RegExp(`\\b(${keywordPattern})\\b`, "gi");
+    const occurrences = new Map();
 
-    KEYWORDS.forEach((keyword) => {
-      const id = keyword.replace(/\s+/g, "_");
-      formattedQuery = formattedQuery.replace(new RegExp(keyword, "gi"), `<span id="${id}">${keyword}</span>`);
+    this.elements.queryDisplay.innerHTML = query.replace(keywordRegex, (match) => {
+      const highlightKey = this.normalizeStepType(match);
+      const occurrence = occurrences.get(highlightKey) || 0;
+      occurrences.set(highlightKey, occurrence + 1);
+      return `<span class="query-keyword" data-keyword="${highlightKey}" data-occurrence="${occurrence}">${match}</span>`;
     });
-
-    this.elements.queryDisplay.innerHTML = formattedQuery;
 
     if (!error || !error.location) {
       return;
@@ -201,10 +209,15 @@ export class QueryVisualizerApp {
     );
   }
 
-  highlightStep(stepType) {
+  highlightStep(stepType, stepIndex = this.stepIndex) {
     this.clearHighlight();
-    const keywordId = STEP_TO_KEYWORD_ID[stepType];
-    const node = document.getElementById(keywordId);
+
+    const highlightKey = this.normalizeStepType(stepType);
+    const occurrence = this.getHighlightOccurrence(highlightKey, stepIndex);
+    const node = this.elements.queryDisplay.querySelector(
+      `[data-keyword="${highlightKey}"][data-occurrence="${occurrence}"]`
+    );
+
     if (node) {
       node.classList.add("active");
     }
@@ -214,6 +227,27 @@ export class QueryVisualizerApp {
     this.elements.queryDisplay.querySelectorAll("span").forEach((node) => {
       node.classList.remove("active");
     });
+  }
+
+  getHighlightOccurrence(stepType, stepIndex) {
+    let occurrence = 0;
+
+    for (let index = 0; index < stepIndex; index += 1) {
+      if (this.normalizeStepType(this.steps[index]?.type) === stepType) {
+        occurrence += 1;
+      }
+    }
+
+    return occurrence;
+  }
+
+
+  normalizeStepType(stepType = "") {
+    return String(stepType || "")
+      .trim()
+      .replace(/_/g, " ")
+      .replace(/\s+/g, " ")
+      .toUpperCase();
   }
 
   updateButtons() {
