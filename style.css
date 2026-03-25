@@ -210,6 +210,14 @@ h1 {
   white-space: nowrap;
 }
 
+.results-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 textarea {
   width: 100%;
   resize: vertical;
@@ -279,6 +287,40 @@ textarea:focus {
   color: var(--text);
   background: var(--secondary);
   border: 1px solid var(--panel-border);
+}
+
+.button-copy {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.button-copy-icon {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.button-copy-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.button-copy.is-copied {
+  color: #03111d;
+  background: var(--success);
+  border-color: transparent;
+}
+
+.button-copy.is-copied .button-copy-icon svg {
+  transform: scale(1.04);
 }
 
 .query-card,
@@ -435,6 +477,11 @@ tbody tr:hover {
   .panel-heading {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .results-tools {
+    width: 100%;
+    justify-content: flex-start;
   }
 
   .nav-row,

@@ -86,37 +86,42 @@ export class QueryEngine {
 
   parseJoinSources(rawFrom) {
     const sources = [];
-    const upper = rawFrom.toUpperCase();
-    const firstJoinIndex = upper.indexOf(" JOIN ");
+    const firstJoinToken = this.findJoinToken(rawFrom);
 
-    if (firstJoinIndex === -1) {
+    if (!firstJoinToken) {
       return [{ source: this.parseSourceSpec(rawFrom), mode: "BASE", condition: null, raw: rawFrom.trim() }];
     }
 
-    const basePart = rawFrom.slice(0, firstJoinIndex).trim();
+    const basePart = rawFrom.slice(0, firstJoinToken.index).trim();
     sources.push({ source: this.parseSourceSpec(basePart), mode: "BASE", condition: null, raw: basePart });
 
-    let cursor = firstJoinIndex + 6;
+    let cursor = firstJoinToken.index;
     while (cursor < rawFrom.length) {
-      const nextJoinIndex = this.findKeyword(rawFrom, " JOIN ", cursor);
-      const segment = rawFrom.slice(cursor, nextJoinIndex === -1 ? rawFrom.length : nextJoinIndex).trim();
-      const onIndex = segment.toUpperCase().indexOf(" ON ");
+      const joinToken = this.findJoinToken(rawFrom, cursor);
+      if (!joinToken) {
+        break;
+      }
+
+      const segmentStart = joinToken.index + joinToken.length;
+      const nextJoinToken = this.findJoinToken(rawFrom, segmentStart);
+      const segment = rawFrom.slice(segmentStart, nextJoinToken ? nextJoinToken.index : rawFrom.length).trim();
+      const onIndex = joinToken.requiresCondition ? segment.toUpperCase().indexOf(" ON ") : -1;
       const sourcePart = onIndex === -1 ? segment : segment.slice(0, onIndex).trim();
       const conditionPart = onIndex === -1 ? "" : segment.slice(onIndex + 4).trim();
 
       sources.push({
         source: this.parseSourceSpec(sourcePart),
-        mode: "INNER",
+        mode: joinToken.mode,
         condition: conditionPart ? this.parser.parseCondition(conditionPart) : null,
-        raw: segment,
-        invalidCondition: !conditionPart
+        raw: `${joinToken.token} ${segment}`.trim(),
+        invalidCondition: joinToken.requiresCondition && !conditionPart
       });
 
-      if (nextJoinIndex === -1) {
+      if (!nextJoinToken) {
         break;
       }
 
-      cursor = nextJoinIndex + 6;
+      cursor = nextJoinToken.index;
     }
 
     return sources;
@@ -167,7 +172,58 @@ export class QueryEngine {
   }
 
   findKeyword(query, keyword, startIndex = 0) {
-    return query.toUpperCase().indexOf(keyword.trim().toUpperCase(), startIndex);
+    return query.toUpperCase().indexOf(keyword.toUpperCase(), startIndex);
+  }
+
+  findJoinToken(query, startIndex = 0) {
+    const tokens = [
+      { token: "LEFT OUTER JOIN", mode: "LEFT", requiresCondition: true },
+      { token: "RIGHT OUTER JOIN", mode: "RIGHT", requiresCondition: true },
+      { token: "FULL OUTER JOIN", mode: "FULL", requiresCondition: true },
+      { token: "LEFT JOIN", mode: "LEFT", requiresCondition: true },
+      { token: "RIGHT JOIN", mode: "RIGHT", requiresCondition: true },
+      { token: "FULL JOIN", mode: "FULL", requiresCondition: true },
+      { token: "INNER JOIN", mode: "INNER", requiresCondition: true },
+      { token: "CROSS JOIN", mode: "CROSS", requiresCondition: false },
+      { token: "JOIN", mode: "INNER", requiresCondition: true }
+    ];
+
+    const upperQuery = query.toUpperCase();
+    let depth = 0;
+
+    for (let index = startIndex; index <= upperQuery.length - 4; index += 1) {
+      const char = upperQuery[index];
+
+      if (char === "(") {
+        depth += 1;
+        continue;
+      }
+
+      if (char === ")") {
+        depth = Math.max(0, depth - 1);
+        continue;
+      }
+
+      if (depth !== 0) {
+        continue;
+      }
+
+      for (const token of tokens) {
+        if (upperQuery.slice(index, index + token.token.length) !== token.token) {
+          continue;
+        }
+
+        const before = index === 0 ? " " : upperQuery[index - 1];
+        const after = upperQuery[index + token.token.length] || " ";
+        if (!/\s/.test(before) || !/\s|$/.test(after)) {
+          continue;
+        }
+
+        return { ...token, index, length: token.token.length };
+      }
+    }
+
+    return null;
   }
 
   executeStep(dataset, step, scopes = []) {
@@ -271,7 +327,9 @@ export class QueryEngine {
       return [];
     }
 
-    if (joinStep.mode === "INNER" && (!joinStep.condition || joinStep.invalidCondition)) {
+    const joinMode = joinStep.mode || "INNER";
+    const requiresCondition = joinMode !== "CROSS";
+    if (requiresCondition && (!joinStep.condition || joinStep.invalidCondition)) {
       this.setError(this.createError(
         "LogicalError",
         "Invalid JOIN condition",
@@ -281,23 +339,109 @@ export class QueryEngine {
       return [];
     }
 
+    if (joinMode === "CROSS") {
+      return this.buildCrossJoin(leftRows, rightRows);
+    }
+
+    const joined = [];
+    const matchedRight = new Array(rightRows.length).fill(false);
+    const nullRightRow = rightRows.length ? this.createNullRowLike(rightRows[0]) : this.createNullRowForSource(joinStep.source);
+    const nullLeftRow = leftRows.length ? this.createNullRowLike(leftRows[0]) : {};
+
+    leftRows.forEach((leftRow) => {
+      let matchedLeft = false;
+
+      rightRows.forEach((rightRow, rightIndex) => {
+        const mergedRow = this.mergeRows(leftRow, rightRow);
+        if (!this.matchesCondition(mergedRow, joinStep.condition, [mergedRow])) {
+          return;
+        }
+
+        matchedLeft = true;
+        matchedRight[rightIndex] = true;
+        joined.push(mergedRow);
+      });
+
+      if ((joinMode === "LEFT" || joinMode === "FULL") && !matchedLeft) {
+        joined.push(this.mergeRows(leftRow, nullRightRow));
+      }
+    });
+
+    if (joinMode === "RIGHT" || joinMode === "FULL") {
+      rightRows.forEach((rightRow, rightIndex) => {
+        if (matchedRight[rightIndex]) {
+          return;
+        }
+
+        joined.push(this.mergeRows(nullLeftRow, rightRow));
+      });
+    }
+
+    return joined;
+  }
+
+  buildCrossJoin(leftRows, rightRows) {
     const joined = [];
 
     leftRows.forEach((leftRow) => {
       rightRows.forEach((rightRow) => {
-        const mergedRow = this.mergeRows(leftRow, rightRow);
-        if (joinStep.mode === "INNER") {
-          if (this.matchesCondition(mergedRow, joinStep.condition, [mergedRow])) {
-            joined.push(mergedRow);
-          }
-          return;
-        }
-
-        joined.push(mergedRow);
+        joined.push(this.mergeRows(leftRow, rightRow));
       });
     });
 
     return joined;
+  }
+
+  createNullRowLike(templateRow) {
+    const meta = this.getMeta(templateRow);
+    if (!meta) {
+      return {};
+    }
+
+    const rowMap = new Map();
+    const cloneNullRow = (boundRow) => {
+      if (!rowMap.has(boundRow)) {
+        const clone = {};
+        Object.keys(boundRow || {}).forEach((column) => {
+          if (!column.includes(".")) {
+            clone[column] = null;
+          }
+        });
+        rowMap.set(boundRow, clone);
+      }
+      return rowMap.get(boundRow);
+    };
+
+    const bindings = Object.entries(meta.bindings || {}).reduce((accumulator, [key, value]) => {
+      accumulator[key] = cloneNullRow(value);
+      return accumulator;
+    }, {});
+
+    const displayBindings = Object.entries(meta.displayBindings || {}).reduce((accumulator, [key, value]) => {
+      accumulator[key] = cloneNullRow(value);
+      return accumulator;
+    }, {});
+
+    const scopedRow = {};
+    Object.entries(displayBindings).forEach(([alias, row]) => {
+      Object.keys(row).forEach((column) => {
+        scopedRow[`${alias}.${column}`] = null;
+      });
+    });
+
+    this.attachMeta(scopedRow, { bindings, displayBindings });
+    return scopedRow;
+  }
+
+  createNullRowForSource(sourceSpec) {
+    const resolvedTableName = (sourceSpec?.table || "").toLowerCase();
+    const sampleRow = this.resolveTableRows(resolvedTableName)?.[0] || {};
+    const nullRow = Object.keys(sampleRow).reduce((accumulator, key) => {
+      accumulator[key] = null;
+      return accumulator;
+    }, {});
+
+    return this.createScopedRow(nullRow, resolvedTableName, (sourceSpec?.alias || resolvedTableName || "data").toLowerCase());
   }
 
   mergeRows(leftRow, rightRow) {

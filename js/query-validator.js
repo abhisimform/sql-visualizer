@@ -138,7 +138,7 @@ function validateFromClause(context, errors) {
   });
 
   context.ast.filter((step) => step.type === "JOIN").forEach((step) => {
-    if (step.value?.mode === "INNER" && (!step.value.condition || step.value.invalidCondition)) {
+    if (step.value?.mode !== "CROSS" && (!step.value.condition || step.value.invalidCondition)) {
       errors.push(createQueryError(
         "LogicalError",
         "Invalid JOIN condition",
