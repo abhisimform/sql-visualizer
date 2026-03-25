@@ -20,3 +20,7 @@ export const EMPLOYEE_DATA = [
   { name: "Tanish", age: 30, city: "Vadodara", salary: 40000, dept: "Sales" },
   { name: "Usha", age: 28, city: "Rajkot", salary: 36000, dept: "HR" }
 ];
+
+export const QUERY_SCHEMA = {
+  EMPLOYEE_DATA: ["name", "age", "city", "salary", "dept"]
+};

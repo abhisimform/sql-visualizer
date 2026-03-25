@@ -9,7 +9,7 @@ export class TableRenderer {
 
     if (!dataset.length) {
       this.rowCount.textContent = "Rows: 0";
-      this.host.innerHTML = "<table><tbody><tr><td class=\"empty-state\">No rows to display for this step.</td></tr></tbody></table>";
+      this.host.innerHTML = '<table><tbody><tr><td class="empty-state">No rows to display for this step.</td></tr></tbody></table>';
       return;
     }
 
@@ -21,6 +21,29 @@ export class TableRenderer {
 
     this.rowCount.textContent = `Rows: ${dataset.length}`;
     this.host.appendChild(this.createFlatTable(dataset));
+  }
+
+  renderError(error) {
+    this.host.innerHTML = "";
+    this.rowCount.textContent = "Error";
+
+    const suggestion = error.suggestion ? `<p>${error.suggestion}</p>` : "";
+    const location = error.location ? `<p>Line ${error.location.line}, Column ${error.location.column}</p>` : "";
+
+    this.host.innerHTML = `
+      <table>
+        <tbody>
+          <tr>
+            <td class="empty-state">
+              <strong>${error.type}</strong>
+              <p>${error.message}</p>
+              ${location}
+              ${suggestion}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    `;
   }
 
   createFlatTable(dataset) {

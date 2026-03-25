@@ -1,35 +1,89 @@
 export class QueryEngine {
   constructor(sourceData) {
     this.sourceData = sourceData;
+    this.lastError = null;
+    this.queryContext = "";
+  }
+
+  setQueryContext(query) {
+    this.queryContext = query || "";
+  }
+
+  clearError() {
+    this.lastError = null;
+  }
+
+  getError() {
+    return this.lastError;
+  }
+
+  setError(error) {
+    if (!this.lastError) {
+      this.lastError = error;
+    }
+  }
+
+  createError(type, message, token = "", suggestion = "") {
+    const index = token ? this.queryContext.toLowerCase().indexOf(String(token).toLowerCase()) : -1;
+    const safeIndex = index === -1 ? 0 : index;
+    const lines = this.queryContext.slice(0, safeIndex).split("\n");
+
+    return {
+      type,
+      message,
+      location: {
+        line: lines.length,
+        column: lines.at(-1).length + 1
+      },
+      suggestion
+    };
   }
 
   executeStep(dataset, step, scopes = []) {
-    switch (step.type) {
-      case "FROM":
-        return this.getSourceRows(step.value);
-      case "WHERE":
-        return dataset.filter((row) => this.matchesCondition(row, step.value, [row, ...scopes]));
-      case "GROUP BY":
-        return this.groupRows(dataset, step.value, scopes);
-      case "HAVING":
-        return dataset.filter((group) => this.matchesCondition(group, step.value, [group, ...scopes]));
-      case "SELECT":
-        return this.selectColumns(dataset, step.value, scopes);
-      case "ORDER_BY":
-        return this.orderRows(dataset, step.value);
-      case "OFFSET":
-        return dataset.slice(step.value);
-      case "LIMIT":
-        return dataset.slice(0, step.value);
-      default:
-        return dataset;
+    if (this.lastError) {
+      return dataset;
+    }
+
+    try {
+      switch (step.type) {
+        case "FROM":
+          return this.getSourceRows(step.value);
+        case "WHERE":
+          return dataset.filter((row) => this.matchesCondition(row, step.value, [row, ...scopes]));
+        case "GROUP BY":
+          return this.groupRows(dataset, step.value, scopes);
+        case "HAVING":
+          return dataset.filter((group) => this.matchesCondition(group, step.value, [group, ...scopes]));
+        case "SELECT":
+          return this.selectColumns(dataset, step.value, scopes);
+        case "ORDER_BY":
+          return this.orderRows(dataset, step.value);
+        case "OFFSET":
+          return dataset.slice(step.value);
+        case "LIMIT":
+          return dataset.slice(0, step.value);
+        default:
+          return dataset;
+      }
+    } catch (error) {
+      this.setError(this.createError(
+        "ExecutionError",
+        "The query could not be executed safely",
+        step.type,
+        "Check the current step for unsupported or malformed values"
+      ));
+      return [];
     }
   }
 
   executeQuery(steps, scopes = []) {
     let dataset = [];
+    this.clearError();
 
     steps.forEach((step) => {
+      if (this.lastError) {
+        return;
+      }
       dataset = this.executeStep(dataset, step, scopes);
     });
 
@@ -293,12 +347,26 @@ export class QueryEngine {
 
   resolveSubquery(expression, scopes, asSet) {
     const result = this.executeQuery(expression.query, scopes);
+    if (this.lastError) {
+      return asSet ? [] : undefined;
+    }
+
     if (!result.length) {
       return asSet ? [] : undefined;
     }
 
     if (asSet) {
       return result.map((row) => row[Object.keys(row)[0]]);
+    }
+
+    if (result.length > 1) {
+      this.setError(this.createError(
+        "LogicalError",
+        "Subquery returned multiple rows when a single value was expected",
+        expression.raw,
+        "Ensure the subquery returns one row or use IN instead of a scalar comparison"
+      ));
+      return undefined;
     }
 
     const firstRow = result[0];

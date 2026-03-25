@@ -1,9 +1,10 @@
-import { EMPLOYEE_DATA } from "./data.js";
+import { EMPLOYEE_DATA, QUERY_SCHEMA } from "./data.js";
 import { KEYWORDS, STEP_TO_KEYWORD_ID } from "./constants.js";
 import { queryStorage, ThemeStore } from "./storage.js";
 import { QueryParser } from "./query-parser.js";
 import { QueryEngine } from "./query-engine.js";
 import { TableRenderer } from "./table-renderer.js";
+import { validateQuery } from "./query-validator.js";
 
 export class QueryVisualizerApp {
   constructor() {
@@ -27,6 +28,7 @@ export class QueryVisualizerApp {
     this.steps = [];
     this.stepIndex = 0;
     this.currentData = [];
+    this.queryError = null;
 
     this.saveQuery = this.debounce(() => {
       queryStorage.save(this.elements.queryInput.value);
@@ -59,24 +61,67 @@ export class QueryVisualizerApp {
 
   run() {
     const query = this.elements.queryInput.value.trim();
-    this.steps = this.parser.parse(query);
+    this.engine.setQueryContext(query);
+    this.engine.clearError();
+    this.queryError = null;
+
+    try {
+      this.steps = this.parser.parse(query);
+    } catch (error) {
+      this.steps = [];
+      this.queryError = this.createAppError(
+        "SyntaxError",
+        "The query could not be parsed",
+        query,
+        "Check the SQL syntax and try again"
+      );
+    }
+
+    if (!this.queryError) {
+      const errors = validateQuery(this.steps, QUERY_SCHEMA, {
+        rawQuery: query,
+        sampleRows: { EMPLOYEE_DATA: EMPLOYEE_DATA[0] }
+      });
+
+      if (errors.length) {
+        this.queryError = errors[0];
+        this.steps = [];
+      }
+    }
+
     this.stepIndex = 0;
     this.currentData = [];
-
-    this.renderQuery(query);
+    this.renderQuery(query, this.queryError);
     this.clearHighlight();
+
+    if (this.queryError) {
+      this.renderer.renderError(this.queryError);
+      this.updateStepLabel();
+      this.updateButtons();
+      return;
+    }
+
     this.renderer.render([]);
     this.updateStepLabel();
     this.updateButtons();
   }
 
   nextStep() {
-    if (this.stepIndex >= this.steps.length) {
+    if (this.queryError || this.stepIndex >= this.steps.length) {
       return;
     }
 
     const step = this.steps[this.stepIndex];
     this.currentData = this.engine.executeStep(this.currentData, step);
+
+    if (this.engine.getError()) {
+      this.queryError = this.engine.getError();
+      this.renderer.renderError(this.queryError);
+      this.updateStepLabel();
+      this.updateButtons();
+      return;
+    }
+
     this.highlightStep(step.type);
     this.stepIndex += 1;
     this.renderer.render(this.currentData);
@@ -85,17 +130,25 @@ export class QueryVisualizerApp {
   }
 
   prevStep() {
-    if (this.stepIndex === 0) {
+    if (this.queryError || this.stepIndex === 0) {
       return;
     }
 
     const targetIndex = this.stepIndex - 1;
     this.currentData = [];
     this.stepIndex = 0;
+    this.engine.clearError();
     this.clearHighlight();
 
     while (this.stepIndex < targetIndex) {
       this.currentData = this.engine.executeStep(this.currentData, this.steps[this.stepIndex]);
+      if (this.engine.getError()) {
+        this.queryError = this.engine.getError();
+        this.renderer.renderError(this.queryError);
+        this.updateStepLabel();
+        this.updateButtons();
+        return;
+      }
       this.stepIndex += 1;
     }
 
@@ -109,7 +162,7 @@ export class QueryVisualizerApp {
     this.updateButtons();
   }
 
-  renderQuery(query) {
+  renderQuery(query, error = null) {
     let formattedQuery = query;
 
     KEYWORDS.forEach((keyword) => {
@@ -118,6 +171,34 @@ export class QueryVisualizerApp {
     });
 
     this.elements.queryDisplay.innerHTML = formattedQuery;
+
+    if (!error || !error.location) {
+      return;
+    }
+  }
+
+  highlightErrorLocation(location) {
+    const query = this.elements.queryInput.value;
+    const lines = query.split("\n");
+    const lineIndex = Math.max(0, (location.line || 1) - 1);
+    const columnIndex = Math.max(0, (location.column || 1) - 1);
+    let offset = 0;
+
+    for (let index = 0; index < lineIndex; index += 1) {
+      offset += (lines[index] || "").length + 1;
+    }
+
+    offset += columnIndex;
+    if (offset < 0 || offset >= query.length) {
+      return;
+    }
+
+    const marker = query[offset];
+    const escapedMarker = marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    this.elements.queryDisplay.innerHTML = this.elements.queryDisplay.innerHTML.replace(
+      new RegExp(escapedMarker),
+      `<mark>${marker}</mark>`
+    );
   }
 
   highlightStep(stepType) {
@@ -136,11 +217,22 @@ export class QueryVisualizerApp {
   }
 
   updateButtons() {
+    if (this.queryError) {
+      this.elements.prevButton.disabled = true;
+      this.elements.nextButton.disabled = true;
+      return;
+    }
+
     this.elements.prevButton.disabled = this.stepIndex === 0;
     this.elements.nextButton.disabled = this.stepIndex >= this.steps.length;
   }
 
   updateStepLabel(activeType = "") {
+    if (this.queryError) {
+      this.elements.stepLabel.textContent = `${this.queryError.type}: ${this.queryError.message}`;
+      return;
+    }
+
     if (!this.steps.length) {
       this.elements.stepLabel.textContent = "No valid SQL steps detected.";
       return;
@@ -158,6 +250,19 @@ export class QueryVisualizerApp {
     const theme = document.documentElement.dataset.theme || "dark";
     this.elements.themeLabel.textContent = theme === "dark" ? "Dark mode" : "Light mode";
     this.elements.themeToggle.setAttribute("aria-label", `Switch to ${theme === "dark" ? "light" : "dark"} mode`);
+  }
+
+  createAppError(type, message, query, suggestion) {
+    const lines = query.split("\n");
+    return {
+      type,
+      message,
+      location: {
+        line: lines.length ? 1 : 1,
+        column: 1
+      },
+      suggestion
+    };
   }
 
   debounce(callback, delay) {
