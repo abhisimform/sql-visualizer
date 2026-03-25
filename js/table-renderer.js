@@ -9,7 +9,11 @@ export class TableRenderer {
 
     if (!dataset.length) {
       this.rowCount.textContent = "Rows: 0";
-      this.host.innerHTML = '<table><tbody><tr><td class="empty-state">No rows to display for this step.</td></tr></tbody></table>';
+      this.host.appendChild(
+        this.createTableWrapper(
+          "<table class=\"data-table\"><tbody><tr><td class=\"empty-state\">No rows to display for this step.</td></tr></tbody></table>"
+        )
+      );
       return;
     }
 
@@ -20,7 +24,7 @@ export class TableRenderer {
     }
 
     this.rowCount.textContent = `Rows: ${dataset.length}`;
-    this.host.appendChild(this.createFlatTable(dataset));
+    this.host.appendChild(this.createTableWrapper(this.createFlatTable(dataset)));
   }
 
   renderError(error) {
@@ -30,24 +34,41 @@ export class TableRenderer {
     const suggestion = error.suggestion ? `<p>${error.suggestion}</p>` : "";
     const location = error.location ? `<p>Line ${error.location.line}, Column ${error.location.column}</p>` : "";
 
-    this.host.innerHTML = `
-      <table>
-        <tbody>
-          <tr>
-            <td class="empty-state">
-              <strong>${error.type}</strong>
-              <p>${error.message}</p>
-              ${location}
-              ${suggestion}
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    `;
+    this.host.appendChild(
+      this.createTableWrapper(`
+        <table class="data-table">
+          <tbody>
+            <tr>
+              <td class="empty-state">
+                <strong>${error.type}</strong>
+                <p>${error.message}</p>
+                ${location}
+                ${suggestion}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      `)
+    );
+  }
+
+  createTableWrapper(content) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "table-scroll";
+
+    if (typeof content === "string") {
+      wrapper.innerHTML = content;
+    } else {
+      wrapper.appendChild(content);
+    }
+
+    return wrapper;
   }
 
   createFlatTable(dataset) {
     const table = document.createElement("table");
+    table.className = "data-table";
+
     const headers = Object.keys(dataset[0]);
     const thead = document.createElement("thead");
     const headerRow = document.createElement("tr");
@@ -100,7 +121,7 @@ export class TableRenderer {
         content.hidden = isExpanded;
       });
 
-      content.appendChild(this.createFlatTable(group.rows));
+      content.appendChild(this.createTableWrapper(this.createFlatTable(group.rows)));
       wrapper.append(button, content);
       this.host.appendChild(wrapper);
     });
