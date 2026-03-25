@@ -3,100 +3,158 @@ export class QueryEngine {
     this.sourceData = sourceData;
   }
 
-  executeStep(dataset, step) {
+  executeStep(dataset, step, scopes = []) {
     switch (step.type) {
       case "FROM":
         return this.getSourceRows(step.value);
       case "WHERE":
-        return dataset.filter((row) => this.matchesCondition(row, step.value));
+        return dataset.filter((row) => this.matchesCondition(row, step.value, [row, ...scopes]));
       case "GROUP BY":
-        return this.groupRows(dataset, step.value);
+        return this.groupRows(dataset, step.value, scopes);
       case "HAVING":
-        return dataset.filter((group) => this.matchesCondition(group, step.value));
+        return dataset.filter((group) => this.matchesCondition(group, step.value, [group, ...scopes]));
       case "SELECT":
-        return this.selectColumns(dataset, step.value);
+        return this.selectColumns(dataset, step.value, scopes);
       case "ORDER_BY":
         return this.orderRows(dataset, step.value);
+      case "OFFSET":
+        return dataset.slice(step.value);
+      case "LIMIT":
+        return dataset.slice(0, step.value);
       default:
         return dataset;
     }
   }
 
-  executeQuery(steps) {
+  executeQuery(steps, scopes = []) {
     let dataset = [];
 
     steps.forEach((step) => {
-      dataset = this.executeStep(dataset, step);
+      dataset = this.executeStep(dataset, step, scopes);
     });
 
     return dataset;
   }
 
-  getSourceRows(tableName) {
-    const normalized = String(tableName || "").trim().replace(/;$/, "").toLowerCase();
+  getSourceRows(fromClause) {
+    const tableName = (fromClause?.table || fromClause || "").toString().trim().replace(/;$/, "").toLowerCase();
+    const alias = (fromClause?.alias || tableName || "data").toLowerCase();
     const supportedTables = new Set(["employee_data", "data", "employees"]);
 
-    if (!normalized || supportedTables.has(normalized)) {
-      return this.cloneRows(this.sourceData);
+    if (!tableName || supportedTables.has(tableName)) {
+      return this.sourceData.map((row) => this.createScopedRow(row, tableName || "employee_data", alias));
     }
 
-    return this.cloneRows(this.sourceData);
+    return this.sourceData.map((row) => this.createScopedRow(row, tableName, alias));
+  }
+
+  createScopedRow(row, tableName, alias) {
+    const scopedRow = { ...row };
+    const bindings = {
+      [tableName]: scopedRow,
+      [alias]: scopedRow
+    };
+
+    this.attachMeta(scopedRow, {
+      tableName,
+      alias,
+      bindings
+    });
+
+    return scopedRow;
   }
 
   cloneRows(rows) {
-    return rows.map((row) => ({ ...row }));
+    return rows.map((row) => this.cloneRow(row));
   }
 
-  groupRows(rows, columns) {
-    const groupColumns = Array.isArray(columns) ? columns : [columns];
+  cloneRow(row) {
+    const cloned = { ...row };
+    const meta = this.getMeta(row);
+    if (meta) {
+      this.attachMeta(cloned, {
+        ...meta,
+        bindings: Object.keys(meta.bindings || {}).reduce((accumulator, key) => {
+          accumulator[key] = cloned;
+          return accumulator;
+        }, {})
+      });
+    }
+    return cloned;
+  }
+
+  attachMeta(target, meta) {
+    Object.defineProperty(target, "__sqlMeta", {
+      value: meta,
+      enumerable: false,
+      configurable: true,
+      writable: true
+    });
+  }
+
+  getMeta(target) {
+    return target && target.__sqlMeta ? target.__sqlMeta : null;
+  }
+
+  groupRows(rows, expressions, scopes) {
     const groups = new Map();
 
     rows.forEach((row) => {
-      const keyValues = groupColumns.map((column) => row[column]);
+      const rowScopes = [row, ...scopes];
+      const keyValues = expressions.map((expression) => this.resolveExpression(row, expression, rowScopes));
       const key = JSON.stringify(keyValues);
       const bucket = groups.get(key) || { keyValues, rows: [] };
-      bucket.rows.push({ ...row });
+      bucket.rows.push(this.cloneRow(row));
       groups.set(key, bucket);
     });
 
     return Array.from(groups.values()).map((group) => {
-      const values = {};
-      groupColumns.forEach((column, index) => {
-        values[column] = group.keyValues[index];
+      const groupValues = {};
+      expressions.forEach((expression, index) => {
+        const label = this.getExpressionLabel(expression);
+        groupValues[label] = group.keyValues[index];
       });
 
-      return {
+      const grouped = {
         groupKey: group.keyValues.join(" | "),
-        groupColumns,
-        groupValues: values,
+        groupColumns: expressions,
+        groupValues,
         count: group.rows.length,
         rows: group.rows
       };
+
+      const firstMeta = this.getMeta(group.rows[0]);
+      if (firstMeta) {
+        this.attachMeta(grouped, firstMeta);
+      }
+
+      return grouped;
     });
   }
 
-  selectColumns(dataset, columns) {
+  selectColumns(dataset, columns, scopes) {
     if (!dataset.length) {
       return [];
     }
 
     if (this.isGrouped(dataset)) {
-      return dataset.map((group) => this.buildSelectedRow(group, columns));
+      return dataset.map((group) => this.buildSelectedRow(group, columns, scopes));
     }
 
-    if (columns.some((column) => column.kind === "aggregate")) {
-      return [this.buildSelectedRow(dataset, columns)];
+    if (columns.some((column) => this.containsAggregate(column))) {
+      return [this.buildSelectedRow(dataset, columns, scopes)];
     }
 
-    return dataset.map((row) => this.buildSelectedRow(row, columns));
+    return dataset.map((row) => this.buildSelectedRow(row, columns, scopes));
   }
 
-  buildSelectedRow(source, columns) {
+  buildSelectedRow(source, columns, scopes) {
     const selected = {};
     const representativeRow = this.pickRepresentativeRow(source, columns);
+    const activeScopes = representativeRow && representativeRow !== source ? [representativeRow, source, ...scopes] : [source, ...scopes];
 
     columns.forEach((column) => {
-      selected[column.alias] = this.resolveSelectExpression(source, column, representativeRow);
+      selected[column.alias] = this.resolveExpression(source, column, activeScopes, representativeRow);
     });
 
     return selected;
@@ -107,48 +165,159 @@ export class QueryEngine {
       return Array.isArray(source) ? source[0] : source;
     }
 
-    const aggregateColumn = columns.find((column) => column.kind === "aggregate" && ["MAX", "MIN"].includes(column.fn));
-    if (!aggregateColumn || aggregateColumn.argument === "*") {
+    const aggregate = columns
+      .map((column) => this.findRepresentativeAggregate(column))
+      .find(Boolean);
+
+    if (!aggregate || aggregate.argument.kind !== "column") {
       return source.rows[0];
     }
 
+    const argumentName = aggregate.argument.name;
     const sortedRows = [...source.rows].sort((left, right) => {
-      const leftValue = left[aggregateColumn.argument];
-      const rightValue = right[aggregateColumn.argument];
-      return aggregateColumn.fn === "MAX" ? rightValue - leftValue : leftValue - rightValue;
+      const leftValue = left[argumentName];
+      const rightValue = right[argumentName];
+      return aggregate.fn === "MAX" ? rightValue - leftValue : leftValue - rightValue;
     });
 
     return sortedRows[0] || source.rows[0];
   }
 
-  resolveSelectExpression(source, expression, representativeRow) {
-    if (expression.kind === "aggregate") {
-      return this.calculateAggregate(source, expression.fn, expression.argument);
+  findRepresentativeAggregate(expression) {
+    if (!expression) {
+      return null;
     }
 
-    const column = expression.column;
-
-    if (column === "group") {
-      return this.isGroup(source) ? source.groupKey : undefined;
+    if (expression.kind === "aggregate" && ["MAX", "MIN"].includes(expression.fn)) {
+      return expression;
     }
 
-    if (column === "groupkey") {
+    if (expression.kind === "binary") {
+      return this.findRepresentativeAggregate(expression.left) || this.findRepresentativeAggregate(expression.right);
+    }
+
+    return null;
+  }
+
+  resolveExpression(source, expression, scopes, representativeRow = null) {
+    switch (expression.kind) {
+      case "column":
+        return this.resolveColumnValue(source, expression, scopes, representativeRow);
+      case "literal":
+        return expression.value;
+      case "aggregate":
+        return this.calculateAggregate(source, expression, scopes);
+      case "binary":
+        return this.applyBinaryOperator(
+          expression.operator,
+          this.resolveExpression(source, expression.left, scopes, representativeRow),
+          this.resolveExpression(source, expression.right, scopes, representativeRow)
+        );
+      case "subquery":
+        return this.resolveSubquery(expression, scopes, false);
+      case "list":
+        return expression.values.map((value) => this.resolveExpression(source, value, scopes, representativeRow));
+      case "star":
+        return "*";
+      default:
+        return undefined;
+    }
+  }
+
+  resolveColumnValue(source, expression, scopes, representativeRow) {
+    if (expression.name === "group" || expression.name === "groupkey") {
       return this.isGroup(source) ? source.groupKey : undefined;
     }
 
     if (this.isGroup(source)) {
-      if (column in source.groupValues) {
-        return source.groupValues[column];
+      const label = this.getExpressionLabel(expression);
+      if (!expression.qualifier && label in source.groupValues) {
+        return source.groupValues[label];
+      }
+    }
+
+    const candidates = representativeRow && representativeRow !== source ? [representativeRow, ...scopes] : scopes;
+
+    for (const scope of candidates) {
+      if (!scope) {
+        continue;
       }
 
-      return representativeRow ? representativeRow[column] : undefined;
+      if (this.isGroup(scope) && !expression.qualifier) {
+        const label = this.getExpressionLabel(expression);
+        if (label in scope.groupValues) {
+          return scope.groupValues[label];
+        }
+      }
+
+      const meta = this.getMeta(scope);
+      if (expression.qualifier && meta?.bindings?.[expression.qualifier]) {
+        return meta.bindings[expression.qualifier][expression.name];
+      }
+
+      if (!expression.qualifier && expression.name in scope) {
+        return scope[expression.name];
+      }
     }
 
-    if (Array.isArray(source)) {
-      return source[0] ? source[0][column] : undefined;
+    return undefined;
+  }
+
+  calculateAggregate(source, expression, scopes) {
+    const rows = this.getRowsFromSource(source);
+
+    switch (expression.fn) {
+      case "COUNT":
+        if (expression.argument.kind === "star") {
+          return rows.length;
+        }
+        return rows.filter((row) => this.resolveExpression(row, expression.argument, [row, ...scopes]) !== undefined).length;
+      case "SUM":
+        return rows.reduce((total, row) => total + (Number(this.resolveExpression(row, expression.argument, [row, ...scopes])) || 0), 0);
+      case "AVG":
+        return rows.length ? this.calculateAggregate(source, { ...expression, fn: "SUM" }, scopes) / rows.length : 0;
+      case "MAX":
+        return rows.reduce((max, row) => {
+          const value = this.resolveExpression(row, expression.argument, [row, ...scopes]);
+          return max === undefined || value > max ? value : max;
+        }, undefined);
+      case "MIN":
+        return rows.reduce((min, row) => {
+          const value = this.resolveExpression(row, expression.argument, [row, ...scopes]);
+          return min === undefined || value < min ? value : min;
+        }, undefined);
+      default:
+        return undefined;
+    }
+  }
+
+  resolveSubquery(expression, scopes, asSet) {
+    const result = this.executeQuery(expression.query, scopes);
+    if (!result.length) {
+      return asSet ? [] : undefined;
     }
 
-    return source[column];
+    if (asSet) {
+      return result.map((row) => row[Object.keys(row)[0]]);
+    }
+
+    const firstRow = result[0];
+    return firstRow[Object.keys(firstRow)[0]];
+  }
+
+  applyBinaryOperator(operator, left, right) {
+    switch (operator) {
+      case "+":
+        return (Number(left) || 0) + (Number(right) || 0);
+      case "-":
+        return (Number(left) || 0) - (Number(right) || 0);
+      case "*":
+        return (Number(left) || 0) * (Number(right) || 0);
+      case "/":
+        return right ? (Number(left) || 0) / Number(right) : 0;
+      default:
+        return undefined;
+    }
   }
 
   orderRows(dataset, orderExpressions) {
@@ -179,31 +348,28 @@ export class QueryEngine {
   }
 
   resolveOrderValue(row, order) {
-    if (order.alias in row) {
+    if (order.alias && order.alias in row) {
       return row[order.alias];
     }
 
-    if (order.raw in row) {
-      return row[order.raw];
+    const label = this.getExpressionLabel(order);
+    if (label in row) {
+      return row[label];
     }
 
-    if (order.kind === "column" && order.column in row) {
-      return row[order.column];
+    if (order.kind === "column" && order.name in row) {
+      return row[order.name];
     }
 
     return undefined;
   }
 
-  matchesCondition(item, condition) {
+  matchesCondition(source, condition, scopes) {
     if (!condition || !condition.clauses.length) {
       return true;
     }
 
-    const results = condition.clauses.map((clause) => {
-      const leftValue = this.resolveOperand(item, clause.left);
-      const rightValue = this.resolveConditionValue(clause.right);
-      return this.compareValues(leftValue, clause.operator, rightValue);
-    });
+    const results = condition.clauses.map((clause) => this.evaluateClause(source, clause, scopes));
 
     return condition.connectors.reduce((accumulator, connector, index) => {
       const nextResult = results[index + 1];
@@ -211,53 +377,23 @@ export class QueryEngine {
     }, results[0]);
   }
 
-  resolveOperand(item, operand) {
-    if (operand.kind === "aggregate") {
-      return this.calculateAggregate(item, operand.fn, operand.argument);
+  evaluateClause(source, clause, scopes) {
+    const leftValue = this.resolveExpression(source, clause.left, scopes);
+
+    if (clause.operator === "IN" || clause.operator === "NOT IN") {
+      const rightValues = clause.right.kind === "subquery"
+        ? this.resolveSubquery(clause.right, scopes, true)
+        : this.resolveExpression(source, clause.right, scopes);
+      const haystack = Array.isArray(rightValues) ? rightValues : [rightValues];
+      const matched = haystack.some((value) => value == leftValue);
+      return clause.operator === "IN" ? matched : !matched;
     }
 
-    if (this.isGroup(item) && operand.column in item.groupValues) {
-      return item.groupValues[operand.column];
-    }
+    const rightValue = clause.right.kind === "subquery"
+      ? this.resolveSubquery(clause.right, scopes, false)
+      : this.resolveExpression(source, clause.right, scopes);
 
-    return item[operand.column];
-  }
-
-  resolveConditionValue(value) {
-    if (value && value.kind === "subquery") {
-      const result = this.executeQuery(value.query);
-      if (!result.length) {
-        return undefined;
-      }
-
-      const firstRow = result[0];
-      const firstKey = Object.keys(firstRow)[0];
-      return firstRow[firstKey];
-    }
-
-    return value;
-  }
-
-  calculateAggregate(source, fn, argument) {
-    const rows = this.getRowsFromSource(source);
-
-    switch (fn) {
-      case "COUNT":
-        if (argument === "*") {
-          return rows.length;
-        }
-        return rows.filter((row) => row[argument] !== undefined && row[argument] !== null).length;
-      case "SUM":
-        return rows.reduce((total, row) => total + (Number(row[argument]) || 0), 0);
-      case "AVG":
-        return rows.length ? this.calculateAggregate(source, "SUM", argument) / rows.length : 0;
-      case "MAX":
-        return rows.reduce((max, row) => (max === undefined || row[argument] > max ? row[argument] : max), undefined);
-      case "MIN":
-        return rows.reduce((min, row) => (min === undefined || row[argument] < min ? row[argument] : min), undefined);
-      default:
-        return undefined;
-    }
+    return this.compareValues(leftValue, clause.operator, rightValue);
   }
 
   getRowsFromSource(source) {
@@ -289,6 +425,34 @@ export class QueryEngine {
       default:
         return false;
     }
+  }
+
+  getExpressionLabel(expression) {
+    if (expression.alias) {
+      return expression.alias;
+    }
+
+    if (expression.kind === "column") {
+      return expression.name;
+    }
+
+    return expression.raw;
+  }
+
+  containsAggregate(expression) {
+    if (!expression) {
+      return false;
+    }
+
+    if (expression.kind === "aggregate") {
+      return true;
+    }
+
+    if (expression.kind === "binary") {
+      return this.containsAggregate(expression.left) || this.containsAggregate(expression.right);
+    }
+
+    return false;
   }
 
   isGrouped(dataset) {
