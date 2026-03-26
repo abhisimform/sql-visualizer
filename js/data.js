@@ -41,7 +41,7 @@ export const PRODUCTS = [
   { id: 2, name: "Desk Chair", price: 8500, category: "Furniture", category_id: 2 },
   { id: 3, name: "Headphones", price: 3200, category: "Electronics", category_id: 1 },
   { id: 4, name: "Notebook", price: 120, category: "Stationery", category_id: 3 },
-  { id: 5, name: "Coffee Mug", price: 450, category: "Kitchen", category_id: 4 }
+  { id: 5, name: "Coffee Mug", price: 450, category: "Kitchen", category_id: 3 }
 ];
 
 export const ORDERS = [

@@ -1,10 +1,15 @@
+import { DATABASE } from "./data.js";
+import { AnimationEngine } from "./animation-engine.js";
+
 export class TableRenderer {
-  constructor(elements) {
+  constructor(elements, options = {}) {
     this.host = elements.table;
     this.rowCount = elements.rowCount;
     this.copyButton = elements.copyDataButton;
     this.currentDataset = [];
     this.copyResetTimer = null;
+    this.sourceData = options.sourceData || DATABASE;
+    this.animations = new AnimationEngine();
 
     if (this.copyButton) {
       this.copyButton.addEventListener("click", () => this.copyCurrentData());
@@ -12,13 +17,65 @@ export class TableRenderer {
     }
   }
 
-  render(dataset) {
-    this.host.innerHTML = "";
-    this.currentDataset = Array.isArray(dataset) ? dataset : [];
+  async renderTransition({ previousDataset = [], nextDataset = [], step = null }) {
+    const normalizedPrevious = Array.isArray(previousDataset) ? previousDataset : [];
+    const normalizedNext = Array.isArray(nextDataset) ? nextDataset : [];
+
+    this.currentDataset = normalizedNext;
+    this.updateRowCount(normalizedNext);
     this.syncCopyButton();
 
-    if (!dataset.length) {
-      this.rowCount.textContent = "Rows: 0";
+    if (!normalizedNext.length) {
+      this.render(normalizedNext);
+      return;
+    }
+
+    if (step?.type === "JOIN") {
+      const rightDataset = this.resolveTableRows(step.value?.source?.table);
+      await this.animations.animateJoin({
+        host: this.host,
+        leftDataset: normalizedPrevious,
+        rightDataset,
+        joinMeta: step.value || {},
+        resultDataset: normalizedNext,
+        summarizeRow: (row) => this.summarizeRow(row, { compact: true }),
+        buildFinalState: () => this.render(normalizedNext)
+      });
+      return;
+    }
+
+    if (step?.type === "GROUP BY" && this.isFlatRows(normalizedPrevious) && this.isGrouped(normalizedNext)) {
+      await this.animations.animateGrouping({
+        host: this.host,
+        previousDataset: normalizedPrevious,
+        groupedData: normalizedNext,
+        getRowLabel: (row) => this.summarizeRow(row, { compact: true }),
+        buildFinalState: () => this.render(normalizedNext)
+      });
+      return;
+    }
+
+    if (this.isFlatRows(normalizedPrevious) && this.isFlatRows(normalizedNext)) {
+      const mode = step?.type === "ORDER_BY" ? "reorder" : step?.type === "WHERE" ? "filter" : "rows";
+      await this.animations.animateRowsDiff({
+        host: this.host,
+        mode,
+        buildFinalState: () => this.render(normalizedNext)
+      });
+      return;
+    }
+
+    this.render(normalizedNext);
+  }
+
+  render(dataset) {
+    this.host.innerHTML = "";
+    this.host.classList.remove("table-host-grouped");
+    this.currentDataset = Array.isArray(dataset) ? dataset : [];
+    this.updateRowCount(this.currentDataset);
+    this.syncCopyButton();
+
+    if (!this.currentDataset.length) {
       this.host.appendChild(
         this.createTableWrapper(
           "<table class=\"data-table\"><tbody><tr><td class=\"empty-state\">No rows to display for this step.</td></tr></tbody></table>"
@@ -27,18 +84,18 @@ export class TableRenderer {
       return;
     }
 
-    if (this.isGrouped(dataset)) {
-      this.rowCount.textContent = `Groups: ${dataset.length}`;
-      this.renderGroupedData(dataset);
+    if (this.isGrouped(this.currentDataset)) {
+      this.host.classList.add("table-host-grouped");
+      this.renderGroupedData(this.currentDataset);
       return;
     }
 
-    this.rowCount.textContent = `Rows: ${dataset.length}`;
-    this.host.appendChild(this.createTableWrapper(this.createFlatTable(dataset)));
+    this.host.appendChild(this.createTableWrapper(this.createFlatTable(this.currentDataset)));
   }
 
   renderError(error) {
     this.host.innerHTML = "";
+    this.host.classList.remove("table-host-grouped");
     this.currentDataset = [];
     this.syncCopyButton();
     this.rowCount.textContent = "Error";
@@ -64,6 +121,15 @@ export class TableRenderer {
     );
   }
 
+  updateRowCount(dataset) {
+    if (!Array.isArray(dataset) || !dataset.length) {
+      this.rowCount.textContent = "Rows: 0";
+      return;
+    }
+
+    this.rowCount.textContent = this.isGrouped(dataset) ? `Groups: ${dataset.length}` : `Rows: ${dataset.length}`;
+  }
+
   createTableWrapper(content) {
     const wrapper = document.createElement("div");
     wrapper.className = "table-scroll";
@@ -82,6 +148,7 @@ export class TableRenderer {
     table.className = "data-table";
 
     const headers = Object.keys(dataset[0]);
+    const keyedRows = this.annotateRows(dataset);
     const thead = document.createElement("thead");
     const headerRow = document.createElement("tr");
 
@@ -94,8 +161,9 @@ export class TableRenderer {
     thead.appendChild(headerRow);
 
     const tbody = document.createElement("tbody");
-    dataset.forEach((row) => {
+    keyedRows.forEach(({ row, key }) => {
       const tr = document.createElement("tr");
+      tr.dataset.rowKey = key;
 
       headers.forEach((header) => {
         const td = document.createElement("td");
@@ -111,21 +179,26 @@ export class TableRenderer {
   }
 
   renderGroupedData(dataset) {
+    const columns = Math.max(1, Math.min(dataset.length, dataset.length <= 2 ? 2 : dataset.length <= 4 ? 3 : 4));
+    this.host.style.setProperty("--group-columns", String(columns));
+
     dataset.forEach((group, index) => {
       const wrapper = document.createElement("div");
       wrapper.className = "group-card";
+      wrapper.style.setProperty("--group-size", String(group.rows.length));
 
       const button = document.createElement("button");
       button.type = "button";
       button.className = "group-toggle";
-      button.setAttribute("aria-expanded", index === 0 ? "true" : "false");
+      // button.setAttribute("aria-expanded", index === 0 ? "true" : "false");
+      button.setAttribute("aria-expanded", "true");
       button.innerHTML = `<span>Group: ${group.groupKey}</span><span>${group.count} rows</span>`;
 
       const content = document.createElement("div");
       content.className = "group-content";
-      if (index !== 0) {
-        content.hidden = true;
-      }
+      // if (index !== 0) {
+      //   content.hidden = true;
+      // }
 
       button.addEventListener("click", () => {
         const isExpanded = button.getAttribute("aria-expanded") === "true";
@@ -139,8 +212,87 @@ export class TableRenderer {
     });
   }
 
+  annotateRows(dataset) {
+    const seen = new Map();
+    return dataset.map((row) => {
+      const signature = this.stableKey(row);
+      const occurrence = seen.get(signature) || 0;
+      seen.set(signature, occurrence + 1);
+      return {
+        row,
+        key: `${signature}__${occurrence}`
+      };
+    });
+  }
+
+  summarizeRow(row, options = {}) {
+    const compact = Boolean(options.compact);
+
+    if (!row || typeof row !== "object") {
+      return String(row);
+    }
+
+    const preferredKeys = ["id", "name", "city", "status", "dept", "order_date"];
+    const chosen = [];
+
+    preferredKeys.forEach((key) => {
+      if (chosen.length >= (compact ? 2 : 3)) {
+        return;
+      }
+      if (Object.prototype.hasOwnProperty.call(row, key) && row[key] !== undefined) {
+        chosen.push([key, row[key]]);
+      }
+    });
+
+    if (!chosen.length) {
+      Object.entries(row).slice(0, compact ? 2 : 3).forEach((entry) => chosen.push(entry));
+    }
+
+    return chosen
+      .map(([key, value]) => `${this.formatSummaryKey(key)}: ${this.truncateValue(value, compact ? 14 : 22)}`)
+      .join(" | ");
+  }
+
+  formatSummaryKey(key) {
+    return String(key || "")
+      .replace(/_/g, " ")
+      .replace(/\bid\b/i, "ID");
+  }
+
+  truncateValue(value, maxLength) {
+    const text = String(value ?? "");
+    return text.length > maxLength ? `${text.slice(0, maxLength - 1)}...` : text;
+  }
+
+  resolveTableRows(tableName) {
+    const normalizedName = String(tableName || "").toLowerCase();
+    const exactKey = Object.keys(this.sourceData || {}).find((key) => key.toLowerCase() === normalizedName);
+    return exactKey ? this.sourceData[exactKey] : [];
+  }
+
   isGrouped(dataset) {
     return Boolean(dataset[0] && Array.isArray(dataset[0].rows));
+  }
+
+  isFlatRows(dataset) {
+    return Array.isArray(dataset) && (!dataset.length || !Array.isArray(dataset[0]?.rows));
+  }
+
+  stableKey(value) {
+    if (value === null || value === undefined) {
+      return String(value);
+    }
+
+    if (Array.isArray(value)) {
+      return `[${value.map((item) => this.stableKey(item)).join(",")}]`;
+    }
+
+    if (typeof value === "object") {
+      const keys = Object.keys(value).sort();
+      return `{${keys.map((key) => `${key}:${this.stableKey(value[key])}`).join("|")}}`;
+    }
+
+    return JSON.stringify(value);
   }
 
   syncCopyButton() {

@@ -18,18 +18,20 @@ export class QueryVisualizerApp {
       rowCount: document.getElementById("rowCount"),
       copyDataButton: document.getElementById("copyDataButton"),
       table: document.getElementById("table"),
+      resultsPanel: document.querySelector(".panel-results"),
       themeToggle: document.getElementById("themeToggle"),
       themeLabel: document.getElementById("themeLabel")
     };
 
     this.parser = new QueryParser();
     this.engine = new QueryEngine(DATABASE);
-    this.renderer = new TableRenderer(this.elements);
+    this.renderer = new TableRenderer(this.elements, { sourceData: DATABASE });
     this.themeStore = new ThemeStore();
     this.steps = [];
     this.stepIndex = 0;
     this.currentData = [];
     this.queryError = null;
+    this.isAnimating = false;
 
     this.saveQuery = this.debounce(() => {
       queryStorage.save(this.elements.queryInput.value);
@@ -61,6 +63,10 @@ export class QueryVisualizerApp {
   }
 
   run() {
+    if (this.isAnimating) {
+      return;
+    }
+
     const query = this.elements.queryInput.value.trim();
     this.engine.setQueryContext(query);
     this.engine.clearError();
@@ -107,12 +113,13 @@ export class QueryVisualizerApp {
     this.updateButtons();
   }
 
-  nextStep() {
-    if (this.queryError || this.stepIndex >= this.steps.length) {
+  async nextStep() {
+    if (this.queryError || this.stepIndex >= this.steps.length || this.isAnimating) {
       return;
     }
 
     const step = this.steps[this.stepIndex];
+    const previousData = this.snapshotDataset(this.currentData);
     this.currentData = this.engine.executeStep(this.currentData, step);
 
     if (this.engine.getError()) {
@@ -123,21 +130,38 @@ export class QueryVisualizerApp {
       return;
     }
 
+    this.isAnimating = true;
+    this.elements.resultsPanel?.classList.add("is-animating");
     this.highlightStep(step.type, this.stepIndex);
     this.stepIndex += 1;
-    this.renderer.render(this.currentData);
     this.updateStepLabel(step.type);
     this.updateButtons();
+
+    try {
+      await this.renderer.renderTransition({
+        previousDataset: previousData,
+        nextDataset: this.currentData,
+        step,
+        stepIndex: this.stepIndex - 1,
+        steps: this.steps
+      });
+    } finally {
+      this.isAnimating = false;
+      this.elements.resultsPanel?.classList.remove("is-animating");
+      this.updateStepLabel(step.type);
+      this.updateButtons();
+    }
   }
 
   prevStep() {
-    if (this.queryError || this.stepIndex === 0) {
+    if (this.queryError || this.stepIndex === 0 || this.isAnimating) {
       return;
     }
 
     const targetIndex = this.stepIndex - 1;
     this.currentData = [];
     this.stepIndex = 0;
+    this.elements.resultsPanel?.classList.remove("is-animating");
     this.engine.clearError();
     this.clearHighlight();
 
@@ -241,7 +265,6 @@ export class QueryVisualizerApp {
     return occurrence;
   }
 
-
   normalizeStepType(stepType = "") {
     return String(stepType || "")
       .trim()
@@ -250,8 +273,24 @@ export class QueryVisualizerApp {
       .toUpperCase();
   }
 
+  snapshotDataset(dataset) {
+    if (typeof structuredClone === "function") {
+      return structuredClone(dataset);
+    }
+
+    return JSON.parse(JSON.stringify(dataset || []));
+  }
+
   updateButtons() {
+    this.elements.runButton.disabled = this.isAnimating;
+
     if (this.queryError) {
+      this.elements.prevButton.disabled = true;
+      this.elements.nextButton.disabled = true;
+      return;
+    }
+
+    if (this.isAnimating) {
       this.elements.prevButton.disabled = true;
       this.elements.nextButton.disabled = true;
       return;
@@ -277,7 +316,9 @@ export class QueryVisualizerApp {
       return;
     }
 
-    this.elements.stepLabel.textContent = `Step ${this.stepIndex} of ${this.steps.length}: ${activeType}`;
+    this.elements.stepLabel.textContent = this.isAnimating
+      ? `Animating step ${this.stepIndex} of ${this.steps.length}: ${activeType}`
+      : `Step ${this.stepIndex} of ${this.steps.length}: ${activeType}`;
   }
 
   updateThemeLabel() {
