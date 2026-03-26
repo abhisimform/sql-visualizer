@@ -1,6 +1,7 @@
 const CLAUSE_SEQUENCE = ["SELECT", "FROM", "WHERE", "GROUP BY", "HAVING", "ORDER BY", "OFFSET", "LIMIT"];
 const BUILT_IN_FUNCTIONS = new Set(["COUNT", "AVG", "SUM", "MAX", "MIN"]);
 const PSEUDO_COLUMNS = new Set(["group", "groupkey", "count"]);
+const CONDITION_TYPE_EXEMPT_OPERATORS = new Set(["IN", "NOT IN", "LIKE", "NOT LIKE", "BETWEEN", "NOT BETWEEN", "IS NULL", "IS NOT NULL", "EXISTS", "NOT EXISTS"]);
 
 export function validateQuery(ast, schema, options = {}) {
   const rawQuery = options.rawQuery || "";
@@ -44,11 +45,20 @@ function createValidationContext(ast, schema, sampleRows, rawQuery, outerAliases
     return accumulator;
   }, {});
 
-  const sources = collectSources(ast).map((source) => ({
-    ...source,
-    tableName: source.table.toUpperCase(),
-    aliasName: source.alias.toLowerCase()
-  }));
+  const sources = collectSources(ast).map((source) => {
+    const tableName = source.table.toUpperCase();
+    const aliasName = source.alias.toLowerCase();
+    const columns = source.subquery
+      ? getSubqueryColumns(source, normalizedSchema, sampleRows, rawQuery, outerAliases)
+      : normalizedSchema[tableName] || [];
+
+    return {
+      ...source,
+      tableName,
+      aliasName,
+      columns
+    };
+  });
 
   const groupByStep = ast.find((step) => step.type === "GROUP BY");
   const selectStep = ast.find((step) => step.type === "SELECT");
@@ -69,7 +79,10 @@ function createValidationContext(ast, schema, sampleRows, rawQuery, outerAliases
     availableAliases: aliases,
     groupExpressions: groupByStep ? groupByStep.value : [],
     selectExpressions: selectStep ? selectStep.value : [],
-    selectAliases: new Set((selectStep ? selectStep.value : []).map((expression) => expression.alias).filter(Boolean))
+    selectAliases: new Set((selectStep ? selectStep.value : []).map((expression) => expression.alias).filter(Boolean)),
+    selectAliasExpressions: new Map((selectStep ? selectStep.value : [])
+      .filter((expression) => expression.alias)
+      .map((expression) => [expression.alias.toLowerCase(), expression]))
   };
 }
 
@@ -127,6 +140,19 @@ function validateClauseOrder(rawQuery, errors) {
 
 function validateFromClause(context, errors) {
   context.sources.forEach((source) => {
+    if (source.subquery) {
+      const subqueryErrors = validateQuery(source.subquery, context.schema, {
+        rawQuery: source.raw,
+        sampleRows: context.sampleRows,
+        outerAliases: context.availableAliases
+      });
+
+      if (subqueryErrors.length) {
+        errors.push(subqueryErrors[0]);
+      }
+      return;
+    }
+
     if (!context.schema[source.tableName]) {
       errors.push(createQueryError(
         "SemanticError",
@@ -233,6 +259,8 @@ function validateExpression(expression, context, errors, stepType = "") {
     case "subquery":
       validateSubquery(expression, context, errors);
       return;
+    case "star":
+      return;
     case "list":
       expression.values.forEach((value) => validateExpression(value, context, errors, stepType));
       return;
@@ -270,7 +298,7 @@ function validateColumnReference(expression, context, errors, stepType) {
       return;
     }
 
-    const columns = context.schema[matchedSource.tableName] || [];
+    const columns = getSourceColumns(matchedSource, context);
     if (!columns.includes(expression.name)) {
       errors.push(createQueryError(
         "SemanticError",
@@ -282,13 +310,19 @@ function validateColumnReference(expression, context, errors, stepType) {
     return;
   }
 
-  const matchedSources = context.sources.filter((source) => (context.schema[source.tableName] || []).includes(expression.name));
-
-  if (matchedSources.length === 1) {
+  if (stepType === "HAVING" && context.selectAliasExpressions.has(expression.name)) {
     return;
   }
 
-  if (matchedSources.length > 1) {
+  const matchedSources = context.sources.filter((source) => (context.schema[source.tableName] || []).includes(expression.name));
+  const aliasMatchedSources = context.sources.filter((source) => getSourceColumns(source, context).includes(expression.name));
+  const resolvedSources = aliasMatchedSources.length ? aliasMatchedSources : matchedSources;
+
+  if (resolvedSources.length === 1) {
+    return;
+  }
+
+  if (resolvedSources.length > 1) {
     errors.push(createQueryError(
       "SemanticError",
       `Column '${expression.name}' is ambiguous`,
@@ -302,7 +336,7 @@ function validateColumnReference(expression, context, errors, stepType) {
     return;
   }
 
-  const allColumns = Array.from(new Set(context.sources.flatMap((source) => context.schema[source.tableName] || [])));
+  const allColumns = Array.from(new Set(context.sources.flatMap((source) => getSourceColumns(source, context))));
   errors.push(createQueryError(
     "SemanticError",
     `Column '${expression.name}' does not exist`,
@@ -362,9 +396,8 @@ function validateAggregateUsage(context, errors) {
     return;
   }
 
-  const groupLabels = new Set(context.groupExpressions.map((expression) => getExpressionLabel(expression)));
   nonAggregateColumns.forEach((expression) => {
-    if (groupLabels.has(getExpressionLabel(expression))) {
+    if (context.groupExpressions.some((groupExpression) => expressionsMatch(groupExpression, expression))) {
       return;
     }
 
@@ -383,6 +416,13 @@ function validateTypeComparisons(context, errors) {
     .forEach((step) => {
       const clauses = step.type === "JOIN" ? step.value?.condition?.clauses || [] : step.value.clauses;
       clauses.forEach((clause) => {
+        if (CONDITION_TYPE_EXEMPT_OPERATORS.has(clause.operator)) {
+          if (clause.operator === "LIKE" || clause.operator === "NOT LIKE") {
+            validateLikeOperands(clause, context, errors);
+          }
+          return;
+        }
+
         const leftType = inferExpressionType(clause.left, context);
         const rightType = inferExpressionType(clause.right, context);
 
@@ -395,6 +435,20 @@ function validateTypeComparisons(context, errors) {
     });
 }
 
+function validateLikeOperands(clause, context, errors) {
+  const leftType = inferExpressionType(clause.left, context);
+  const rightType = inferExpressionType(clause.right, context);
+
+  if ((leftType !== "string" && leftType !== "unknown") || (rightType !== "string" && rightType !== "unknown")) {
+    errors.push(createQueryError(
+      "TypeError",
+      "LIKE expects string values",
+      findTokenLocation(context.rawQuery, clause.operator),
+      "Use LIKE with text columns or string literals"
+    ));
+  }
+}
+
 function inferExpressionType(expression, context) {
   if (!expression) {
     return "unknown";
@@ -402,6 +456,9 @@ function inferExpressionType(expression, context) {
 
   switch (expression.kind) {
     case "literal":
+      if (expression.value === null) {
+        return "null";
+      }
       return typeof expression.value === "number" ? "number" : typeof expression.value === "string" ? "string" : "unknown";
     case "column": {
       const qualifier = expression.qualifier ? expression.qualifier.toLowerCase() : "";
@@ -410,7 +467,12 @@ function inferExpressionType(expression, context) {
         return matchedSource ? inferColumnType(matchedSource, expression.name, context) : "unknown";
       }
 
-      const matchedSource = context.sources.find((source) => (context.schema[source.tableName] || []).includes(expression.name));
+      const aliasedExpression = context.selectAliasExpressions.get(expression.name);
+      if (aliasedExpression && !isTrivialAliasReference(expression, aliasedExpression)) {
+        return inferExpressionType(aliasedExpression, context);
+      }
+
+      const matchedSource = context.sources.find((source) => getSourceColumns(source, context).includes(expression.name));
       return matchedSource ? inferColumnType(matchedSource, expression.name, context) : "unknown";
     }
     case "aggregate":
@@ -424,15 +486,74 @@ function inferExpressionType(expression, context) {
       const selectStep = expression.query.find((step) => step.type === "SELECT");
       return selectStep?.value?.[0] ? inferExpressionType(selectStep.value[0], context) : "unknown";
     }
+    case "star":
+      return "unknown";
     default:
       return "unknown";
   }
 }
 
 function inferColumnType(source, columnName, context) {
+  if (source.subquery) {
+    const expression = getSubquerySelectExpression(source, columnName);
+    return expression ? inferExpressionType(expression, context) : "unknown";
+  }
+
   const sampleRow = context.sampleRows[source.tableName] || {};
   const value = sampleRow[columnName];
   return typeof value === "number" ? "number" : typeof value === "string" ? "string" : "unknown";
+}
+
+function getSourceColumns(source, context) {
+  return source.columns || context.schema[source.tableName] || [];
+}
+
+function getSubqueryColumns(source, schema, sampleRows, rawQuery, outerAliases) {
+  const subqueryContext = createValidationContext(source.subquery, schema, sampleRows, source.raw || rawQuery, outerAliases);
+  return subqueryContext.selectExpressions.map((expression) => getExpressionLabel(expression));
+}
+
+function getSubquerySelectExpression(source, columnName) {
+  const selectStep = source.subquery?.find((step) => step.type === "SELECT");
+  if (!selectStep) {
+    return null;
+  }
+
+  return selectStep.value.find((expression) => getExpressionLabel(expression) === columnName) || null;
+}
+
+function isTrivialAliasReference(referenceExpression, aliasedExpression) {
+  return aliasedExpression.kind === "column"
+    && !aliasedExpression.qualifier
+    && aliasedExpression.name === referenceExpression.name;
+}
+
+function expressionsMatch(left, right) {
+  if (!left || !right || left.kind !== right.kind) {
+    return false;
+  }
+
+  switch (left.kind) {
+    case "column":
+      return left.qualifier === right.qualifier && left.name === right.name;
+    case "aggregate":
+      return left.fn === right.fn && expressionsMatch(left.argument, right.argument);
+    case "binary":
+      return left.operator === right.operator
+        && expressionsMatch(left.left, right.left)
+        && expressionsMatch(left.right, right.right);
+    case "literal":
+      return left.value === right.value;
+    case "star":
+      return true;
+    case "list":
+      return left.values.length === right.values.length
+        && left.values.every((value, index) => expressionsMatch(value, right.values[index]));
+    case "subquery":
+      return left.raw === right.raw;
+    default:
+      return left.raw === right.raw;
+  }
 }
 
 function containsAggregate(expression) {
@@ -452,6 +573,10 @@ function containsAggregate(expression) {
 }
 
 function getExpressionLabel(expression) {
+  if (!expression) {
+    return "";
+  }
+
   if (expression.alias) {
     return expression.alias;
   }

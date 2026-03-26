@@ -68,9 +68,9 @@ export const PAYMENTS = [
 ];
 
 export const DEPARTMENTS = [
-  { id: 1, name: "Engineering" },
-  { id: 2, name: "People Ops" },
-  { id: 3, name: "Revenue" }
+  { id: 1, name: "IT" },
+  { id: 2, name: "Sales" },
+  { id: 3, name: "HR" }
 ];
 
 export const DATABASE = {

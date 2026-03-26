@@ -28,10 +28,15 @@ export class QueryParser {
     }
 
     if (clauses.select) {
+      const { distinct, raw } = this.parseSelectClause(clauses.select.raw);
       steps.push({
         type: "SELECT",
-        value: this.splitTopLevel(clauses.select.raw, ",").map((value) => this.parseSelectExpression(value))
+        value: this.splitTopLevel(raw, ",").map((value) => this.parseSelectExpression(value))
       });
+
+      if (distinct) {
+        steps.push({ type: "DISTINCT", value: true });
+      }
     }
 
     if (clauses.orderBy) {
@@ -164,15 +169,7 @@ export class QueryParser {
   }
 
   parseFromClause(expression) {
-    const match = expression.trim().match(/^([a-zA-Z_][\w]*)(?:\s+(?:AS\s+)?([a-zA-Z_][\w]*))?$/i);
-    const table = match ? match[1].toLowerCase() : expression.trim().toLowerCase();
-    const alias = match && match[2] ? match[2].toLowerCase() : table;
-
-    return {
-      raw: expression.trim(),
-      table,
-      alias
-    };
+    return this.parseSourceSpec(expression);
   }
 
   parseSelectExpression(expression) {
@@ -183,6 +180,16 @@ export class QueryParser {
     return {
       ...parsed,
       alias: alias || defaultAlias
+    };
+  }
+
+  parseSelectClause(expression) {
+    const trimmed = expression.trim();
+    const distinctMatch = trimmed.match(/^DISTINCT\s+(.*)$/i);
+
+    return {
+      distinct: Boolean(distinctMatch),
+      raw: distinctMatch ? distinctMatch[1].trim() : trimmed
     };
   }
 
@@ -225,24 +232,75 @@ export class QueryParser {
         return;
       }
 
-      const operator = this.findConditionOperator(part);
-      if (!operator) {
+      const clause = this.parseConditionClause(part);
+      if (!clause) {
         return;
       }
 
-      const upper = part.toUpperCase();
-      const operatorIndex = upper.indexOf(operator.token, operator.index);
-      const left = part.slice(0, operatorIndex).trim();
-      const right = part.slice(operatorIndex + operator.token.length).trim();
-
-      clauses.push({
-        left: this.parseExpression(left),
-        operator: operator.kind,
-        right: this.parseExpression(right)
-      });
+      clauses.push(clause);
     });
 
     return { raw: normalized, clauses, connectors };
+  }
+
+  parseConditionClause(expression) {
+    const trimmed = expression.trim();
+    const upper = trimmed.toUpperCase();
+
+    const existsMatch = trimmed.match(/^(NOT\s+)?EXISTS\s*(\(.+\))$/i);
+    if (existsMatch) {
+      return {
+        left: null,
+        operator: existsMatch[1] ? "NOT EXISTS" : "EXISTS",
+        right: this.parseExpression(existsMatch[2].trim())
+      };
+    }
+
+    const isNullMatch = trimmed.match(/^(.*?)\s+IS\s+(NOT\s+)?NULL$/i);
+    if (isNullMatch) {
+      return {
+        left: this.parseExpression(isNullMatch[1].trim()),
+        operator: isNullMatch[2] ? "IS NOT NULL" : "IS NULL",
+        right: { kind: "literal", value: null, raw: "null" }
+      };
+    }
+
+    const betweenOperator = this.findConditionOperator(trimmed);
+    if (!betweenOperator) {
+      return null;
+    }
+
+    if (betweenOperator.kind === "BETWEEN" || betweenOperator.kind === "NOT BETWEEN") {
+      const operatorIndex = betweenOperator.index;
+      const betweenAndIndex = this.findBetweenAndIndex(trimmed, operatorIndex + betweenOperator.token.length);
+      if (betweenAndIndex === -1) {
+        return null;
+      }
+
+      const left = trimmed.slice(0, operatorIndex).trim();
+      const first = trimmed.slice(operatorIndex + betweenOperator.token.length, betweenAndIndex).trim();
+      const second = trimmed.slice(betweenAndIndex + 5).trim();
+
+      return {
+        left: this.parseExpression(left),
+        operator: betweenOperator.kind,
+        right: {
+          kind: "list",
+          values: [this.parseExpression(first), this.parseExpression(second)],
+          raw: `${first}, ${second}`
+        }
+      };
+    }
+
+    const operatorIndex = upper.indexOf(betweenOperator.token, betweenOperator.index);
+    const left = trimmed.slice(0, operatorIndex).trim();
+    const right = trimmed.slice(operatorIndex + betweenOperator.token.length).trim();
+
+    return {
+      left: this.parseExpression(left),
+      operator: betweenOperator.kind,
+      right: this.parseExpression(right)
+    };
   }
 
   splitConditionParts(expression) {
@@ -250,6 +308,7 @@ export class QueryParser {
     let depth = 0;
     let current = "";
     let index = 0;
+    let betweenPending = false;
 
     while (index < expression.length) {
       const char = expression[index];
@@ -268,8 +327,23 @@ export class QueryParser {
         continue;
       }
 
+      const betweenMatch = depth === 0 ? expression.slice(index).match(/^(BETWEEN|NOT\s+BETWEEN)\b/i) : null;
+      if (betweenMatch) {
+        betweenPending = true;
+        current += betweenMatch[0];
+        index += betweenMatch[0].length;
+        continue;
+      }
+
       const connectorMatch = depth === 0 ? expression.slice(index).match(/^(\s+)(AND|OR)(\s+)/i) : null;
       if (connectorMatch) {
+        if (betweenPending && connectorMatch[2].toUpperCase() === "AND") {
+          betweenPending = false;
+          current += connectorMatch[0];
+          index += connectorMatch[0].length;
+          continue;
+        }
+
         if (current.trim()) {
           parts.push(current.trim());
         }
@@ -292,6 +366,10 @@ export class QueryParser {
 
   findConditionOperator(expression) {
     const operators = [
+      { token: " NOT BETWEEN ", kind: "NOT BETWEEN" },
+      { token: " BETWEEN ", kind: "BETWEEN" },
+      { token: " NOT LIKE ", kind: "NOT LIKE" },
+      { token: " LIKE ", kind: "LIKE" },
       { token: " NOT IN ", kind: "NOT IN" },
       { token: " IN ", kind: "IN" },
       { token: ">=", kind: ">=" },
@@ -379,6 +457,14 @@ export class QueryParser {
         kind: "literal",
         value: numeric,
         raw: trimmed
+      };
+    }
+
+    if (/^NULL$/i.test(trimmed)) {
+      return {
+        kind: "literal",
+        value: null,
+        raw: "null"
       };
     }
 
@@ -492,5 +578,99 @@ export class QueryParser {
       default:
         return expression.raw || "value";
     }
+  }
+
+  parseSourceSpec(expression) {
+    const trimmed = expression.trim();
+    const derived = this.parseDerivedSource(trimmed);
+    if (derived) {
+      return derived;
+    }
+
+    const match = trimmed.match(/^([a-zA-Z_][\w]*)(?:\s+(?:AS\s+)?([a-zA-Z_][\w]*))?$/i);
+    const table = match ? match[1].toLowerCase() : trimmed.toLowerCase();
+    const alias = match && match[2] ? match[2].toLowerCase() : table;
+
+    return {
+      raw: trimmed,
+      table,
+      alias
+    };
+  }
+
+  parseDerivedSource(expression) {
+    if (!expression.startsWith("(")) {
+      return null;
+    }
+
+    const closingIndex = this.findMatchingParenthesis(expression, 0);
+    if (closingIndex === -1) {
+      return null;
+    }
+
+    const inner = expression.slice(1, closingIndex).trim();
+    const remainder = expression.slice(closingIndex + 1).trim();
+    const aliasMatch = remainder.match(/^(?:AS\s+)?([a-zA-Z_][\w]*)$/i);
+    if (!/^SELECT\s+/i.test(inner) || !aliasMatch) {
+      return null;
+    }
+
+    const alias = aliasMatch[1].toLowerCase();
+
+    return {
+      raw: expression,
+      table: alias,
+      alias,
+      subquery: this.parse(inner)
+    };
+  }
+
+  findMatchingParenthesis(expression, startIndex) {
+    let depth = 0;
+
+    for (let index = startIndex; index < expression.length; index += 1) {
+      const char = expression[index];
+
+      if (char === "(") {
+        depth += 1;
+      } else if (char === ")") {
+        depth -= 1;
+      }
+
+      if (depth === 0) {
+        return index;
+      }
+    }
+
+    return -1;
+  }
+
+  findBetweenAndIndex(expression, startIndex) {
+    const upper = expression.toUpperCase();
+    let depth = 0;
+
+    for (let index = startIndex; index < upper.length - 4; index += 1) {
+      const char = upper[index];
+
+      if (char === "(") {
+        depth += 1;
+        continue;
+      }
+
+      if (char === ")") {
+        depth = Math.max(0, depth - 1);
+        continue;
+      }
+
+      if (depth !== 0) {
+        continue;
+      }
+
+      if (upper.slice(index, index + 5) === " AND ") {
+        return index;
+      }
+    }
+
+    return -1;
   }
 }

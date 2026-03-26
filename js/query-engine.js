@@ -45,7 +45,7 @@ export class QueryEngine {
   expandExecutionSteps(steps) {
     const fromIndex = steps.findIndex((step) => step.type === "FROM");
     if (fromIndex === -1) {
-      return steps;
+      return this.resolveHavingAliases(steps);
     }
 
     const fromStep = steps[fromIndex];
@@ -63,7 +63,7 @@ export class QueryEngine {
     }));
 
     expandedSteps.splice(fromIndex + 1, 0, ...joinSteps);
-    return expandedSteps;
+    return this.resolveHavingAliases(expandedSteps);
   }
 
   parseFromSources(rawFrom) {
@@ -128,14 +128,47 @@ export class QueryEngine {
   }
 
   parseSourceSpec(expression) {
-    const match = expression.trim().match(/^([a-zA-Z_][\w]*)(?:\s+(?:AS\s+)?([a-zA-Z_][\w]*))?$/i);
-    const table = match ? match[1].toLowerCase() : expression.trim().toLowerCase();
+    const trimmed = expression.trim();
+    const derived = this.parseDerivedSource(trimmed);
+    if (derived) {
+      return derived;
+    }
+
+    const match = trimmed.match(/^([a-zA-Z_][\w]*)(?:\s+(?:AS\s+)?([a-zA-Z_][\w]*))?$/i);
+    const table = match ? match[1].toLowerCase() : trimmed.toLowerCase();
     const alias = match && match[2] ? match[2].toLowerCase() : table;
 
     return {
-      raw: expression.trim(),
+      raw: trimmed,
       table,
       alias
+    };
+  }
+
+  parseDerivedSource(expression) {
+    if (!expression.startsWith("(")) {
+      return null;
+    }
+
+    const closingIndex = this.findMatchingParenthesis(expression, 0);
+    if (closingIndex === -1) {
+      return null;
+    }
+
+    const inner = expression.slice(1, closingIndex).trim();
+    const remainder = expression.slice(closingIndex + 1).trim();
+    const aliasMatch = remainder.match(/^(?:AS\s+)?([a-zA-Z_][\w]*)$/i);
+    if (!/^SELECT\s+/i.test(inner) || !aliasMatch) {
+      return null;
+    }
+
+    const alias = aliasMatch[1].toLowerCase();
+
+    return {
+      raw: expression,
+      table: alias,
+      alias,
+      subquery: this.parser.parse(inner)
     };
   }
 
@@ -226,6 +259,115 @@ export class QueryEngine {
     return null;
   }
 
+  findMatchingParenthesis(expression, startIndex) {
+    let depth = 0;
+
+    for (let index = startIndex; index < expression.length; index += 1) {
+      const char = expression[index];
+
+      if (char === "(") {
+        depth += 1;
+      } else if (char === ")") {
+        depth -= 1;
+      }
+
+      if (depth === 0) {
+        return index;
+      }
+    }
+
+    return -1;
+  }
+
+  resolveHavingAliases(steps) {
+    const havingStep = steps.find((step) => step.type === "HAVING");
+    const selectStep = steps.find((step) => step.type === "SELECT");
+    if (!havingStep || !selectStep) {
+      return steps;
+    }
+
+    const aliasMap = new Map(
+      selectStep.value
+        .filter((expression) => expression.alias)
+        .map((expression) => [expression.alias.toLowerCase(), expression])
+    );
+
+    if (!aliasMap.size) {
+      return steps;
+    }
+
+    return steps.map((step) => {
+      if (step !== havingStep) {
+        return step;
+      }
+
+      return {
+        ...step,
+        value: {
+          ...step.value,
+          clauses: step.value.clauses.map((clause) => ({
+            ...clause,
+            left: this.replaceAliasReference(clause.left, aliasMap),
+            right: this.replaceAliasReference(clause.right, aliasMap)
+          }))
+        }
+      };
+    });
+  }
+
+  replaceAliasReference(expression, aliasMap) {
+    if (!expression) {
+      return expression;
+    }
+
+    if (expression.kind === "column" && !expression.qualifier && aliasMap.has(expression.name)) {
+      return this.cloneExpression(aliasMap.get(expression.name), { keepAlias: false });
+    }
+
+    if (expression.kind === "binary") {
+      return {
+        ...expression,
+        left: this.replaceAliasReference(expression.left, aliasMap),
+        right: this.replaceAliasReference(expression.right, aliasMap)
+      };
+    }
+
+    if (expression.kind === "aggregate") {
+      return {
+        ...expression,
+        argument: this.replaceAliasReference(expression.argument, aliasMap)
+      };
+    }
+
+    if (expression.kind === "list") {
+      return {
+        ...expression,
+        values: expression.values.map((value) => this.replaceAliasReference(value, aliasMap))
+      };
+    }
+
+    return expression;
+  }
+
+  cloneExpression(expression, options = {}) {
+    if (!expression || typeof expression !== "object") {
+      return expression;
+    }
+
+    const clone = Array.isArray(expression)
+      ? expression.map((item) => this.cloneExpression(item, options))
+      : Object.entries(expression).reduce((accumulator, [key, value]) => {
+          if (!options.keepAlias && key === "alias") {
+            return accumulator;
+          }
+
+          accumulator[key] = this.cloneExpression(value, options);
+          return accumulator;
+        }, {});
+
+    return clone;
+  }
+
   executeStep(dataset, step, scopes = []) {
     if (this.lastError) {
       return dataset;
@@ -245,6 +387,8 @@ export class QueryEngine {
           return dataset.filter((group) => this.matchesCondition(group, step.value, [group, ...scopes]));
         case "SELECT":
           return this.selectColumns(dataset, step.value, scopes);
+        case "DISTINCT":
+          return this.distinctRows(dataset);
         case "ORDER_BY":
           return this.orderRows(dataset, step.value);
         case "OFFSET":
@@ -280,6 +424,10 @@ export class QueryEngine {
   }
 
   getSourceRows(fromClause) {
+    if (fromClause?.subquery) {
+      return this.executeDerivedSource(fromClause);
+    }
+
     const tableName = (fromClause?.table || fromClause || "").toString().trim().replace(/;$/, "").toLowerCase();
     const alias = (fromClause?.alias || tableName || "data").toLowerCase();
     const resolvedTableName = tableName || "employee_data";
@@ -296,6 +444,16 @@ export class QueryEngine {
     }
 
     return dataset.map((row) => this.createScopedRow(row, resolvedTableName, alias));
+  }
+
+  executeDerivedSource(sourceSpec) {
+    const alias = (sourceSpec?.alias || sourceSpec?.table || "derived").toLowerCase();
+    const result = this.executeQuery(this.expandExecutionSteps(sourceSpec.subquery));
+    if (this.lastError) {
+      return [];
+    }
+
+    return result.map((row) => this.createScopedRow(row, alias, alias));
   }
 
   resolveTableRows(tableName) {
@@ -566,6 +724,20 @@ export class QueryEngine {
     }
 
     return dataset.map((row) => this.buildSelectedRow(row, columns, scopes));
+  }
+
+  distinctRows(dataset) {
+    const seen = new Set();
+
+    return dataset.filter((row) => {
+      const key = this.stableValue(row);
+      if (seen.has(key)) {
+        return false;
+      }
+
+      seen.add(key);
+      return true;
+    });
   }
 
   isSelectAll(columns) {
@@ -859,6 +1031,11 @@ export class QueryEngine {
   }
 
   evaluateClause(source, clause, scopes) {
+    if (clause.operator === "EXISTS" || clause.operator === "NOT EXISTS") {
+      const exists = this.resolveExistsSubquery(clause.right, scopes);
+      return clause.operator === "EXISTS" ? exists : !exists;
+    }
+
     const leftValue = this.resolveExpression(source, clause.left, scopes);
 
     if (clause.operator === "IN" || clause.operator === "NOT IN") {
@@ -868,6 +1045,28 @@ export class QueryEngine {
       const haystack = Array.isArray(rightValues) ? rightValues : [rightValues];
       const matched = haystack.some((value) => value == leftValue);
       return clause.operator === "IN" ? matched : !matched;
+    }
+
+    if (clause.operator === "LIKE" || clause.operator === "NOT LIKE") {
+      const rightValue = this.resolveExpression(source, clause.right, scopes);
+      const matched = this.matchesLike(leftValue, rightValue);
+      return clause.operator === "LIKE" ? matched : !matched;
+    }
+
+    if (clause.operator === "BETWEEN" || clause.operator === "NOT BETWEEN") {
+      const rightValues = clause.right?.kind === "list"
+        ? clause.right.values.map((value) => this.resolveExpression(source, value, scopes))
+        : [undefined, undefined];
+      const matched = leftValue >= rightValues[0] && leftValue <= rightValues[1];
+      return clause.operator === "BETWEEN" ? matched : !matched;
+    }
+
+    if (clause.operator === "IS NULL") {
+      return leftValue === null || leftValue === undefined;
+    }
+
+    if (clause.operator === "IS NOT NULL") {
+      return leftValue !== null && leftValue !== undefined;
     }
 
     const rightValue = clause.right.kind === "subquery"
@@ -906,6 +1105,46 @@ export class QueryEngine {
       default:
         return false;
     }
+  }
+
+  resolveExistsSubquery(expression, scopes) {
+    if (!expression || expression.kind !== "subquery") {
+      return false;
+    }
+
+    const result = this.executeQuery(this.expandExecutionSteps(expression.query), scopes);
+    if (this.lastError) {
+      return false;
+    }
+
+    return result.length > 0;
+  }
+
+  matchesLike(left, right) {
+    const value = String(left ?? "");
+    const pattern = String(right ?? "")
+      .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      .replace(/%/g, ".*")
+      .replace(/_/g, ".");
+
+    return new RegExp(`^${pattern}$`, "i").test(value);
+  }
+
+  stableValue(value) {
+    if (value === null || value === undefined) {
+      return String(value);
+    }
+
+    if (Array.isArray(value)) {
+      return `[${value.map((item) => this.stableValue(item)).join(",")}]`;
+    }
+
+    if (typeof value === "object") {
+      const keys = Object.keys(value).filter((key) => key !== "__sqlMeta").sort();
+      return `{${keys.map((key) => `${key}:${this.stableValue(value[key])}`).join("|")}}`;
+    }
+
+    return JSON.stringify(value);
   }
 
   getExpressionLabel(expression) {

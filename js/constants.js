@@ -1,4 +1,4 @@
-export const KEYWORDS = ["SELECT", "FROM", "JOIN", "ON", "WHERE", "GROUP BY", "HAVING", "ORDER BY", "LIMIT", "OFFSET"];
+export const KEYWORDS = ["SELECT", "DISTINCT", "FROM", "JOIN", "ON", "WHERE", "GROUP BY", "HAVING", "ORDER BY", "LIMIT", "OFFSET"];
 
 export const STEP_TO_KEYWORD_ID = {
   FROM: "FROM",
@@ -7,6 +7,7 @@ export const STEP_TO_KEYWORD_ID = {
   "GROUP BY": "GROUP_BY",
   HAVING: "HAVING",
   SELECT: "SELECT",
+  DISTINCT: "DISTINCT",
   ORDER_BY: "ORDER_BY",
   LIMIT: "LIMIT",
   OFFSET: "OFFSET"
