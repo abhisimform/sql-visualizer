@@ -1,4 +1,7 @@
-import { QueryParser } from "./query-parser.js";
+import { QueryParser } from "../parser/query-parser.js";
+import { createLogger } from "../../services/dev-logger.js";
+
+const logger = createLogger("Engine");
 
 export class QueryEngine {
   constructor(sourceData) {
@@ -6,10 +9,12 @@ export class QueryEngine {
     this.lastError = null;
     this.queryContext = "";
     this.parser = new QueryParser();
+    logger.debug("engine.startEnd", "engine:constructed", { tableCount: Object.keys(sourceData || {}).length });
   }
 
   setQueryContext(query) {
     this.queryContext = query || "";
+    logger.debug("engine.startEnd", "query-context:set", { query: this.queryContext });
   }
 
   clearError() {
@@ -23,6 +28,7 @@ export class QueryEngine {
   setError(error) {
     if (!this.lastError) {
       this.lastError = error;
+      logger.error("engine.errors", "engine:error-set", { error });
     }
   }
 
@@ -43,6 +49,7 @@ export class QueryEngine {
   }
 
   expandExecutionSteps(steps) {
+    logger.debug("engine.steps", "execution-steps:expand-start", { stepTypes: steps.map((step) => step.type) });
     const fromIndex = steps.findIndex((step) => step.type === "FROM");
     if (fromIndex === -1) {
       return this.resolveHavingAliases(steps);
@@ -63,6 +70,7 @@ export class QueryEngine {
     }));
 
     expandedSteps.splice(fromIndex + 1, 0, ...joinSteps);
+    logger.debug("engine.steps", "execution-steps:expand-end", { stepTypes: expandedSteps.map((step) => step.type) });
     return this.resolveHavingAliases(expandedSteps);
   }
 
@@ -373,31 +381,60 @@ export class QueryEngine {
       return dataset;
     }
 
+    logger.debug("engine.steps", "step:execute-start", {
+      type: step.type,
+      inputRows: Array.isArray(dataset) ? dataset.length : 0,
+      scopeDepth: scopes.length
+    });
+
     try {
+      let result;
+
       switch (step.type) {
         case "FROM":
-          return this.getSourceRows(step.value);
+          result = this.getSourceRows(step.value);
+          break;
         case "JOIN":
-          return this.joinRows(dataset, step.value);
+          result = this.joinRows(dataset, step.value);
+          break;
         case "WHERE":
-          return dataset.filter((row) => this.matchesCondition(row, step.value, [row, ...scopes]));
+          result = dataset.filter((row) => this.matchesCondition(row, step.value, [row, ...scopes]));
+          break;
         case "GROUP BY":
-          return this.groupRows(dataset, step.value, scopes);
+          result = this.groupRows(dataset, step.value, scopes);
+          break;
         case "HAVING":
-          return dataset.filter((group) => this.matchesCondition(group, step.value, [group, ...scopes]));
+          result = dataset.filter((group) => this.matchesCondition(group, step.value, [group, ...scopes]));
+          break;
         case "SELECT":
-          return this.selectColumns(dataset, step.value, scopes);
+          result = this.selectColumns(dataset, step.value, scopes);
+          break;
         case "DISTINCT":
-          return this.distinctRows(dataset);
+          result = this.distinctRows(dataset);
+          break;
         case "ORDER_BY":
-          return this.orderRows(dataset, step.value);
+          result = this.orderRows(dataset, step.value);
+          break;
         case "OFFSET":
-          return dataset.slice(step.value);
+          result = dataset.slice(step.value);
+          break;
         case "LIMIT":
-          return dataset.slice(0, step.value);
+          result = dataset.slice(0, step.value);
+          break;
         default:
-          return dataset;
+          result = dataset;
+          break;
       }
+
+      logger.debug("engine.rowCounts", "step:execute-end", {
+        type: step.type,
+        outputRows: Array.isArray(result) ? result.length : 0
+      });
+      if (Array.isArray(result) && result.length && step.type !== "JOIN") {
+        logger.debug("engine.snapshots", "step:snapshot", { type: step.type, sample: result.slice(0, 2) });
+      }
+
+      return result;
     } catch (error) {
       this.setError(this.createError(
         "ExecutionError",
@@ -412,6 +449,7 @@ export class QueryEngine {
   executeQuery(steps, scopes = []) {
     let dataset = [];
     this.clearError();
+    logger.debug("engine.startEnd", "query:execute-start", { stepTypes: steps.map((step) => step.type), scopeDepth: scopes.length });
 
     steps.forEach((step) => {
       if (this.lastError) {
@@ -420,6 +458,7 @@ export class QueryEngine {
       dataset = this.executeStep(dataset, step, scopes);
     });
 
+    logger.debug("engine.startEnd", "query:execute-end", { rowCount: dataset.length, error: this.lastError });
     return dataset;
   }
 
@@ -432,6 +471,7 @@ export class QueryEngine {
     const alias = (fromClause?.alias || tableName || "data").toLowerCase();
     const resolvedTableName = tableName || "employee_data";
     const dataset = this.resolveTableRows(resolvedTableName);
+    logger.debug("engine.tableAccess", "table:load", { requested: tableName, resolvedTableName, alias });
 
     if (!dataset) {
       this.setError(this.createError(
@@ -459,6 +499,10 @@ export class QueryEngine {
   resolveTableRows(tableName) {
     const normalizedName = String(tableName || "").toLowerCase();
     const exactKey = Object.keys(this.sourceData || {}).find((key) => key.toLowerCase() === normalizedName);
+    logger.debug("data.tableAccess", "table:resolve", { requested: tableName, resolved: exactKey || null });
+    if (!exactKey) {
+      logger.warn("data.missing", "table:missing", { tableName });
+    }
     return exactKey ? this.sourceData[exactKey] : null;
   }
 
@@ -480,6 +524,12 @@ export class QueryEngine {
   }
 
   joinRows(leftRows, joinStep) {
+    logger.debug("engine.joins", "join:start", {
+      mode: joinStep.mode,
+      leftRows: leftRows.length,
+      source: joinStep.source?.table,
+      alias: joinStep.source?.alias
+    });
     const rightRows = this.getSourceRows(joinStep.source);
     if (this.lastError) {
       return [];
@@ -498,7 +548,9 @@ export class QueryEngine {
     }
 
     if (joinMode === "CROSS") {
-      return this.buildCrossJoin(leftRows, rightRows);
+      const crossJoined = this.buildCrossJoin(leftRows, rightRows);
+      logger.debug("engine.joins", "join:cross-complete", { outputRows: crossJoined.length });
+      return crossJoined;
     }
 
     const joined = [];
@@ -535,6 +587,7 @@ export class QueryEngine {
       });
     }
 
+    logger.debug("engine.joins", "join:end", { mode: joinMode, outputRows: joined.length });
     return joined;
   }
 
@@ -671,6 +724,7 @@ export class QueryEngine {
   }
 
   groupRows(rows, expressions, scopes) {
+    logger.debug("engine.grouping", "group-by:start", { inputRows: rows.length, expressionCount: expressions.length });
     const groups = new Map();
 
     rows.forEach((row) => {
@@ -682,7 +736,7 @@ export class QueryEngine {
       groups.set(key, bucket);
     });
 
-    return Array.from(groups.values()).map((group) => {
+    const groupedResults = Array.from(groups.values()).map((group) => {
       const groupValues = {};
       expressions.forEach((expression, index) => {
         const label = this.getExpressionLabel(expression);
@@ -704,26 +758,38 @@ export class QueryEngine {
 
       return grouped;
     });
+
+    logger.debug("engine.grouping", "group-by:end", { groupCount: groupedResults.length });
+    return groupedResults;
   }
 
   selectColumns(dataset, columns, scopes) {
+    logger.debug("engine.projection", "select:start", { inputRows: dataset.length, columnCount: columns.length });
     if (!dataset.length) {
       return [];
     }
 
     if (this.isSelectAll(columns)) {
-      return dataset.map((row) => this.expandSelectAll(row));
+      const result = dataset.map((row) => this.expandSelectAll(row));
+      logger.debug("engine.projection", "select:all", { outputRows: result.length });
+      return result;
     }
 
     if (this.isGrouped(dataset)) {
-      return dataset.map((group) => this.buildSelectedRow(group, columns, scopes));
+      const result = dataset.map((group) => this.buildSelectedRow(group, columns, scopes));
+      logger.debug("engine.projection", "select:grouped", { outputRows: result.length });
+      return result;
     }
 
     if (columns.some((column) => this.containsAggregate(column))) {
-      return [this.buildSelectedRow(dataset, columns, scopes)];
+      const result = [this.buildSelectedRow(dataset, columns, scopes)];
+      logger.debug("engine.projection", "select:aggregate-only", { outputRows: result.length });
+      return result;
     }
 
-    return dataset.map((row) => this.buildSelectedRow(row, columns, scopes));
+    const result = dataset.map((row) => this.buildSelectedRow(row, columns, scopes));
+    logger.debug("engine.projection", "select:end", { outputRows: result.length });
+    return result;
   }
 
   distinctRows(dataset) {
@@ -904,6 +970,7 @@ export class QueryEngine {
 
   calculateAggregate(source, expression, scopes) {
     const rows = this.getRowsFromSource(source);
+    logger.debug("engine.aggregates", "aggregate:start", { fn: expression.fn, rowCount: rows.length });
 
     switch (expression.fn) {
       case "COUNT":
@@ -931,6 +998,7 @@ export class QueryEngine {
   }
 
   resolveSubquery(expression, scopes, asSet) {
+    logger.debug("engine.subqueries", "subquery:execute-start", { asSet, raw: expression.raw, scopeDepth: scopes.length });
     const result = this.executeQuery(this.expandExecutionSteps(expression.query), scopes);
     if (this.lastError) {
       return asSet ? [] : undefined;
@@ -941,6 +1009,7 @@ export class QueryEngine {
     }
 
     if (asSet) {
+      logger.debug("engine.subqueries", "subquery:execute-end-set", { rowCount: result.length });
       return result.map((row) => row[Object.keys(row)[0]]);
     }
 
@@ -955,6 +1024,7 @@ export class QueryEngine {
     }
 
     const firstRow = result[0];
+    logger.debug("engine.subqueries", "subquery:execute-end-scalar", { rowCount: result.length });
     return firstRow[Object.keys(firstRow)[0]];
   }
 
@@ -977,6 +1047,7 @@ export class QueryEngine {
     const orders = Array.isArray(orderExpressions) ? orderExpressions : [orderExpressions];
     const sorted = [...dataset];
 
+    logger.debug("engine.sorting", "order-by:start", { inputRows: dataset.length, orderCount: orders.length });
     sorted.sort((left, right) => {
       for (const order of orders) {
         const directionMultiplier = order.direction === "DESC" ? -1 : 1;
@@ -997,6 +1068,7 @@ export class QueryEngine {
       return 0;
     });
 
+    logger.debug("engine.sorting", "order-by:end", { outputRows: sorted.length });
     return sorted;
   }
 
@@ -1023,6 +1095,7 @@ export class QueryEngine {
     }
 
     const results = condition.clauses.map((clause) => this.evaluateClause(source, clause, scopes));
+    logger.debug("engine.filtering", "condition:evaluated", { raw: condition.raw, results, connectors: condition.connectors });
 
     return condition.connectors.reduce((accumulator, connector, index) => {
       const nextResult = results[index + 1];
@@ -1033,6 +1106,7 @@ export class QueryEngine {
   evaluateClause(source, clause, scopes) {
     if (clause.operator === "EXISTS" || clause.operator === "NOT EXISTS") {
       const exists = this.resolveExistsSubquery(clause.right, scopes);
+      logger.debug("engine.filtering", "clause:exists", { operator: clause.operator, exists });
       return clause.operator === "EXISTS" ? exists : !exists;
     }
 
@@ -1044,12 +1118,14 @@ export class QueryEngine {
         : this.resolveExpression(source, clause.right, scopes);
       const haystack = Array.isArray(rightValues) ? rightValues : [rightValues];
       const matched = haystack.some((value) => value == leftValue);
+      logger.debug("engine.filtering", "clause:in", { operator: clause.operator, leftValue, haystackSize: haystack.length, matched });
       return clause.operator === "IN" ? matched : !matched;
     }
 
     if (clause.operator === "LIKE" || clause.operator === "NOT LIKE") {
       const rightValue = this.resolveExpression(source, clause.right, scopes);
       const matched = this.matchesLike(leftValue, rightValue);
+      logger.debug("engine.filtering", "clause:like", { operator: clause.operator, leftValue, rightValue, matched });
       return clause.operator === "LIKE" ? matched : !matched;
     }
 
@@ -1058,6 +1134,7 @@ export class QueryEngine {
         ? clause.right.values.map((value) => this.resolveExpression(source, value, scopes))
         : [undefined, undefined];
       const matched = leftValue >= rightValues[0] && leftValue <= rightValues[1];
+      logger.debug("engine.filtering", "clause:between", { operator: clause.operator, leftValue, bounds: rightValues, matched });
       return clause.operator === "BETWEEN" ? matched : !matched;
     }
 
@@ -1117,6 +1194,7 @@ export class QueryEngine {
       return false;
     }
 
+    logger.debug("engine.subqueries", "subquery:exists", { rowCount: result.length });
     return result.length > 0;
   }
 

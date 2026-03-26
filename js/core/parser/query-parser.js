@@ -1,7 +1,13 @@
+import { createLogger } from "../../services/dev-logger.js";
+
+const logger = createLogger("Parser");
+
 export class QueryParser {
   parse(rawQuery) {
+    logger.debug("parser.startEnd", "parse:start", { rawQuery });
     const query = this.normalizeQuery(rawQuery);
     if (!query) {
+      logger.debug("parser.startEnd", "parse:end-empty");
       return [];
     }
 
@@ -29,6 +35,7 @@ export class QueryParser {
 
     if (clauses.select) {
       const { distinct, raw } = this.parseSelectClause(clauses.select.raw);
+      logger.debug("parser.clauses", "select:clause-detected", { raw, distinct });
       steps.push({
         type: "SELECT",
         value: this.splitTopLevel(raw, ",").map((value) => this.parseSelectExpression(value))
@@ -40,6 +47,7 @@ export class QueryParser {
     }
 
     if (clauses.orderBy) {
+      logger.debug("parser.clauses", "order-by:clause-detected", { raw: clauses.orderBy.raw });
       steps.push({
         type: "ORDER_BY",
         value: this.splitTopLevel(clauses.orderBy.raw, ",").map((value) => this.parseOrderExpression(value))
@@ -60,11 +68,18 @@ export class QueryParser {
       });
     }
 
+    logger.debug("parser.startEnd", "parse:end", {
+      normalizedQuery: query,
+      clauseKeys: Object.keys(clauses),
+      stepTypes: steps.map((step) => step.type)
+    });
     return steps;
   }
 
   normalizeQuery(rawQuery) {
-    return rawQuery.replace(/;\s*$/g, "").replace(/\s+/g, " ").trim();
+    const normalized = rawQuery.replace(/;\s*$/g, "").replace(/\s+/g, " ").trim();
+    logger.debug("parser.startEnd", "query:normalized", { normalized });
+    return normalized;
   }
 
   extractClauses(query) {
@@ -94,6 +109,10 @@ export class QueryParser {
       };
     });
 
+    logger.debug("parser.clauses", "clauses:extracted", {
+      positions: positions.map(({ key, token, index }) => ({ key, token, index })),
+      clauses
+    });
     return clauses;
   }
 
@@ -176,6 +195,7 @@ export class QueryParser {
     const { source, alias } = this.extractAlias(expression);
     const parsed = this.parseExpression(source);
     const defaultAlias = this.getDefaultAlias(parsed);
+    logger.debug("parser.aliases", "select-expression:parsed", { expression, source, alias, defaultAlias });
 
     return {
       ...parsed,
@@ -197,6 +217,7 @@ export class QueryParser {
     const parts = expression.trim().split(/\s+/);
     const direction = ["ASC", "DESC"].includes((parts.at(-1) || "").toUpperCase()) ? parts.pop().toUpperCase() : "ASC";
     const parsed = this.parseExpression(parts.join(" "));
+    logger.debug("parser.expressions", "order-expression:parsed", { expression, direction, parsed });
 
     return {
       ...parsed,
@@ -208,12 +229,14 @@ export class QueryParser {
   extractAlias(expression) {
     const explicitAlias = expression.match(/^(.*)\s+AS\s+([a-zA-Z_][\w]*)$/i);
     if (explicitAlias) {
+      logger.debug("parser.aliases", "alias:explicit", { expression, alias: explicitAlias[2].trim().toLowerCase() });
       return {
         source: explicitAlias[1].trim(),
         alias: explicitAlias[2].trim().toLowerCase()
       };
     }
 
+    logger.debug("parser.aliases", "alias:none", { expression });
     return {
       source: expression.trim(),
       alias: ""
@@ -234,12 +257,14 @@ export class QueryParser {
 
       const clause = this.parseConditionClause(part);
       if (!clause) {
+        logger.warn("parser.conditions", "condition-clause:skipped", { part });
         return;
       }
 
       clauses.push(clause);
     });
 
+    logger.debug("parser.conditions", "condition:parsed", { expression: normalized, clauses, connectors });
     return { raw: normalized, clauses, connectors };
   }
 
@@ -249,6 +274,7 @@ export class QueryParser {
 
     const existsMatch = trimmed.match(/^(NOT\s+)?EXISTS\s*(\(.+\))$/i);
     if (existsMatch) {
+      logger.debug("parser.subqueries", "condition:exists-detected", { expression: trimmed, negated: Boolean(existsMatch[1]) });
       return {
         left: null,
         operator: existsMatch[1] ? "NOT EXISTS" : "EXISTS",
@@ -258,6 +284,7 @@ export class QueryParser {
 
     const isNullMatch = trimmed.match(/^(.*?)\s+IS\s+(NOT\s+)?NULL$/i);
     if (isNullMatch) {
+      logger.debug("parser.conditions", "condition:is-null-detected", { expression: trimmed, negated: Boolean(isNullMatch[2]) });
       return {
         left: this.parseExpression(isNullMatch[1].trim()),
         operator: isNullMatch[2] ? "IS NOT NULL" : "IS NULL",
@@ -361,6 +388,7 @@ export class QueryParser {
       parts.push(current.trim());
     }
 
+    logger.debug("parser.conditions", "condition:split", { expression, parts });
     return parts;
   }
 
@@ -407,6 +435,7 @@ export class QueryParser {
       }
     }
 
+    logger.debug("parser.conditions", "condition:operator-not-found", { expression });
     return null;
   }
 
@@ -419,6 +448,7 @@ export class QueryParser {
     const unwrapped = this.unwrapOuterParentheses(trimmed);
     if (unwrapped !== trimmed) {
       if (/^SELECT\s+/i.test(unwrapped)) {
+        logger.debug("parser.subqueries", "expression:subquery-detected", { expression: trimmed });
         return {
           kind: "subquery",
           query: this.parse(unwrapped),
@@ -428,6 +458,7 @@ export class QueryParser {
 
       const listParts = this.splitTopLevel(unwrapped, ",");
       if (listParts.length > 1) {
+        logger.debug("parser.expressions", "expression:list-detected", { expression: trimmed, items: listParts.length });
         return {
           kind: "list",
           values: listParts.map((value) => this.parseExpression(value)),
@@ -440,6 +471,7 @@ export class QueryParser {
 
     const arithmetic = this.parseBinaryExpression(trimmed, ["+", "-"]) || this.parseBinaryExpression(trimmed, ["*", "/"]);
     if (arithmetic) {
+      logger.debug("parser.expressions", "expression:binary-detected", { expression: trimmed, operator: arithmetic.operator });
       return arithmetic;
     }
 
@@ -472,6 +504,7 @@ export class QueryParser {
     if (aggregate) {
       const fn = (aggregate[1] || aggregate[2]).toUpperCase();
       const argument = aggregate[1] ? { kind: "star", raw: "*" } : this.parseExpression(aggregate[3]);
+      logger.debug("parser.expressions", "expression:aggregate-detected", { expression: trimmed, fn });
       return {
         kind: "aggregate",
         fn,
@@ -484,6 +517,7 @@ export class QueryParser {
     if (columnMatch) {
       const qualifier = columnMatch[2] ? columnMatch[1].toLowerCase() : "";
       const name = (columnMatch[2] || columnMatch[1]).toLowerCase();
+      logger.debug("parser.expressions", "expression:column-detected", { expression: trimmed, qualifier, name });
       return {
         kind: "column",
         qualifier,
@@ -492,6 +526,7 @@ export class QueryParser {
       };
     }
 
+    logger.debug("parser.expressions", "expression:literal-fallback", { expression: trimmed });
     return {
       kind: "literal",
       value: trimmed,
@@ -584,6 +619,7 @@ export class QueryParser {
     const trimmed = expression.trim();
     const derived = this.parseDerivedSource(trimmed);
     if (derived) {
+      logger.debug("parser.sources", "source:derived-detected", { expression: trimmed, alias: derived.alias });
       return derived;
     }
 
@@ -591,6 +627,7 @@ export class QueryParser {
     const table = match ? match[1].toLowerCase() : trimmed.toLowerCase();
     const alias = match && match[2] ? match[2].toLowerCase() : table;
 
+    logger.debug("parser.sources", "source:parsed", { expression: trimmed, table, alias });
     return {
       raw: trimmed,
       table,
@@ -616,6 +653,7 @@ export class QueryParser {
     }
 
     const alias = aliasMatch[1].toLowerCase();
+    logger.debug("parser.subqueries", "source:derived-table-detected", { expression, alias });
 
     return {
       raw: expression,

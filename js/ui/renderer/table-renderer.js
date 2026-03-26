@@ -1,5 +1,8 @@
-import { DATABASE } from "./data.js";
-import { AnimationEngine } from "./animation-engine.js";
+import { DATABASE } from "../../core/data/data.js";
+import { AnimationEngine } from "../animation/animation-engine.js";
+import { createLogger } from "../../services/dev-logger.js";
+
+const logger = createLogger("Renderer");
 
 export class TableRenderer {
   constructor(elements, options = {}) {
@@ -15,6 +18,8 @@ export class TableRenderer {
       this.copyButton.addEventListener("click", () => this.copyCurrentData());
       this.syncCopyButton();
     }
+
+    logger.debug("renderer.lifecycle", "renderer:constructed", { hasCopyButton: Boolean(this.copyButton) });
   }
 
   async renderTransition({ previousDataset = [], nextDataset = [], step = null }) {
@@ -24,13 +29,20 @@ export class TableRenderer {
     this.currentDataset = normalizedNext;
     this.updateRowCount(normalizedNext);
     this.syncCopyButton();
+    logger.debug("renderer.lifecycle", "render-transition:start", {
+      stepType: step?.type || "",
+      previousRows: normalizedPrevious.length,
+      nextRows: normalizedNext.length
+    });
 
     if (!normalizedNext.length) {
+      logger.debug("renderer.mode", "render-transition:fallback-empty");
       this.render(normalizedNext);
       return;
     }
 
     if (step?.type === "JOIN") {
+      logger.debug("renderer.mode", "render-transition:join-animation", { table: step.value?.source?.table });
       const rightDataset = this.resolveTableRows(step.value?.source?.table);
       await this.animations.animateJoin({
         host: this.host,
@@ -45,6 +57,7 @@ export class TableRenderer {
     }
 
     if (step?.type === "GROUP BY" && this.isFlatRows(normalizedPrevious) && this.isGrouped(normalizedNext)) {
+      logger.debug("renderer.mode", "render-transition:group-animation", { groupCount: normalizedNext.length });
       await this.animations.animateGrouping({
         host: this.host,
         previousDataset: normalizedPrevious,
@@ -57,6 +70,7 @@ export class TableRenderer {
 
     if (this.isFlatRows(normalizedPrevious) && this.isFlatRows(normalizedNext)) {
       const mode = step?.type === "ORDER_BY" ? "reorder" : step?.type === "WHERE" ? "filter" : "rows";
+      logger.debug("renderer.mode", "render-transition:row-animation", { mode });
       await this.animations.animateRowsDiff({
         host: this.host,
         mode,
@@ -65,10 +79,12 @@ export class TableRenderer {
       return;
     }
 
+    logger.debug("renderer.mode", "render-transition:direct-render");
     this.render(normalizedNext);
   }
 
   render(dataset) {
+    logger.debug("renderer.lifecycle", "render:start", { rowCount: Array.isArray(dataset) ? dataset.length : 0 });
     this.host.innerHTML = "";
     this.host.classList.remove("table-host-grouped");
     this.currentDataset = Array.isArray(dataset) ? dataset : [];
@@ -76,6 +92,7 @@ export class TableRenderer {
     this.syncCopyButton();
 
     if (!this.currentDataset.length) {
+      logger.debug("renderer.dataset", "render:empty-state");
       this.host.appendChild(
         this.createTableWrapper(
           "<table class=\"data-table\"><tbody><tr><td class=\"empty-state\">No rows to display for this step.</td></tr></tbody></table>"
@@ -85,15 +102,18 @@ export class TableRenderer {
     }
 
     if (this.isGrouped(this.currentDataset)) {
+      logger.debug("renderer.mode", "render:grouped", { groupCount: this.currentDataset.length });
       this.host.classList.add("table-host-grouped");
       this.renderGroupedData(this.currentDataset);
       return;
     }
 
+    logger.debug("renderer.mode", "render:flat", { rowCount: this.currentDataset.length });
     this.host.appendChild(this.createTableWrapper(this.createFlatTable(this.currentDataset)));
   }
 
   renderError(error) {
+    logger.error("renderer.errors", "render:error", { error });
     this.host.innerHTML = "";
     this.host.classList.remove("table-host-grouped");
     this.currentDataset = [];
@@ -179,6 +199,7 @@ export class TableRenderer {
   }
 
   renderGroupedData(dataset) {
+    logger.debug("renderer.dataset", "render-grouped-data", { groupCount: dataset.length });
     const columns = Math.max(1, Math.min(dataset.length, dataset.length <= 2 ? 2 : dataset.length <= 4 ? 3 : 4));
     this.host.style.setProperty("--group-columns", String(columns));
 
@@ -267,6 +288,7 @@ export class TableRenderer {
   resolveTableRows(tableName) {
     const normalizedName = String(tableName || "").toLowerCase();
     const exactKey = Object.keys(this.sourceData || {}).find((key) => key.toLowerCase() === normalizedName);
+    logger.debug("data.tableAccess", "renderer:table-resolve", { requested: tableName, resolved: exactKey || null });
     return exactKey ? this.sourceData[exactKey] : [];
   }
 
@@ -308,6 +330,7 @@ export class TableRenderer {
 
   async copyCurrentData() {
     if (!this.currentDataset.length) {
+      logger.debug("renderer.copy", "copy:blocked-empty");
       return;
     }
 
@@ -315,8 +338,10 @@ export class TableRenderer {
 
     try {
       await navigator.clipboard.writeText(payload);
+      logger.debug("renderer.copy", "copy:success", { length: payload.length });
       this.showCopyState();
     } catch (error) {
+      logger.error("renderer.errors", "copy:clipboard-failed", { error: error.message });
       this.fallbackCopy(payload);
       this.showCopyState();
     }

@@ -1,17 +1,25 @@
+import { createLogger } from "../../services/dev-logger.js";
+
 const CLAUSE_SEQUENCE = ["SELECT", "FROM", "WHERE", "GROUP BY", "HAVING", "ORDER BY", "OFFSET", "LIMIT"];
 const BUILT_IN_FUNCTIONS = new Set(["COUNT", "AVG", "SUM", "MAX", "MIN"]);
 const PSEUDO_COLUMNS = new Set(["group", "groupkey", "count"]);
 const CONDITION_TYPE_EXEMPT_OPERATORS = new Set(["IN", "NOT IN", "LIKE", "NOT LIKE", "BETWEEN", "NOT BETWEEN", "IS NULL", "IS NOT NULL", "EXISTS", "NOT EXISTS"]);
+const logger = createLogger("Validator");
 
 export function validateQuery(ast, schema, options = {}) {
   const rawQuery = options.rawQuery || "";
   const sampleRows = normalizeSampleRows(options.sampleRows || {});
   const errors = [];
+  logger.debug("validator.startEnd", "validate:start", {
+    rawQuery,
+    stepTypes: ast.map((step) => step.type)
+  });
 
   validateRequiredClauses(ast, rawQuery, errors);
   validateClauseOrder(rawQuery, errors);
 
   if (errors.length) {
+    logger.error("validator.errors", "validate:early-failure", { error: errors[0] });
     return errors;
   }
 
@@ -25,6 +33,10 @@ export function validateQuery(ast, schema, options = {}) {
   validateAggregateUsage(context, errors);
   validateTypeComparisons(context, errors);
 
+  logger.debug("validator.startEnd", "validate:end", {
+    errorCount: errors.length,
+    firstError: errors[0] || null
+  });
   return errors;
 }
 
@@ -69,7 +81,7 @@ function createValidationContext(ast, schema, sampleRows, rawQuery, outerAliases
     aliases.add(source.tableName.toLowerCase());
   });
 
-  return {
+  const context = {
     ast,
     rawQuery,
     schema: normalizedSchema,
@@ -84,6 +96,14 @@ function createValidationContext(ast, schema, sampleRows, rawQuery, outerAliases
       .filter((expression) => expression.alias)
       .map((expression) => [expression.alias.toLowerCase(), expression]))
   };
+
+  logger.debug("validator.clauses", "context:created", {
+    sourceCount: sources.length,
+    groupCount: context.groupExpressions.length,
+    selectAliasCount: context.selectAliases.size
+  });
+
+  return context;
 }
 
 function collectSources(ast) {
@@ -154,6 +174,7 @@ function validateFromClause(context, errors) {
     }
 
     if (!context.schema[source.tableName]) {
+      logger.error("validator.tables", "table:missing", { tableName: source.tableName, rawQuery: context.rawQuery });
       errors.push(createQueryError(
         "SemanticError",
         `Table '${source.tableName}' does not exist`,
@@ -165,6 +186,7 @@ function validateFromClause(context, errors) {
 
   context.ast.filter((step) => step.type === "JOIN").forEach((step) => {
     if (step.value?.mode !== "CROSS" && (!step.value.condition || step.value.invalidCondition)) {
+      logger.error("validator.clauses", "join:invalid-condition", { step });
       errors.push(createQueryError(
         "LogicalError",
         "Invalid JOIN condition",
@@ -193,6 +215,7 @@ function validateLimitOffset(ast, rawQuery, errors) {
 function validateHavingUsage(context, errors) {
   const havingStep = context.ast.find((step) => step.type === "HAVING");
   if (havingStep && !context.groupExpressions.length) {
+    logger.error("validator.having", "having:without-group-by", { rawQuery: context.rawQuery });
     errors.push(createQueryError("LogicalError", "HAVING cannot be used without GROUP BY", findTokenLocation(context.rawQuery, "HAVING"), "Add GROUP BY before HAVING or move the filter to WHERE"));
   }
 }
@@ -207,6 +230,7 @@ function validateSelectAliases(context, errors) {
 
     const key = expression.alias.toLowerCase();
     if (aliases.has(key)) {
+      logger.error("validator.aliases", "select-alias:duplicate", { alias: expression.alias });
       errors.push(createQueryError("SemanticError", `Duplicate column alias '${expression.alias}'`, findTokenLocation(context.rawQuery, expression.alias), "Rename one of the selected aliases"));
       return;
     }
@@ -295,6 +319,7 @@ function validateColumnReference(expression, context, errors, stepType) {
         findTokenLocation(context.rawQuery, qualifier),
         "Use a valid table alias from the FROM or JOIN clause"
       ));
+      logger.error("validator.aliases", "alias:not-found", { qualifier, stepType });
       return;
     }
 
@@ -306,6 +331,7 @@ function validateColumnReference(expression, context, errors, stepType) {
         findTokenLocation(context.rawQuery, expression.raw || expression.name),
         closestSuggestion(expression.name, columns, "Did you mean")
       ));
+      logger.error("validator.columns", "column:not-in-qualified-source", { qualifier, column: expression.name });
     }
     return;
   }
@@ -329,6 +355,7 @@ function validateColumnReference(expression, context, errors, stepType) {
       findTokenLocation(context.rawQuery, expression.name),
       "Prefix the column with a table alias"
     ));
+    logger.error("validator.columns", "column:ambiguous", { column: expression.name });
     return;
   }
 
@@ -343,10 +370,12 @@ function validateColumnReference(expression, context, errors, stepType) {
     findTokenLocation(context.rawQuery, expression.raw || expression.name),
     closestSuggestion(expression.name, allColumns, "Did you mean")
   ));
+  logger.error("validator.columns", "column:missing", { column: expression.name, stepType });
 }
 
 function validateAggregateFunction(expression, context, errors) {
   if (!BUILT_IN_FUNCTIONS.has(expression.fn)) {
+    logger.error("validator.aggregates", "aggregate:invalid-function", { fn: expression.fn });
     errors.push(createQueryError("LogicalError", `Invalid function name '${expression.fn}'`, findTokenLocation(context.rawQuery, expression.fn), "Use one of COUNT, AVG, SUM, MAX, MIN"));
   }
 }
@@ -359,6 +388,7 @@ function validateSubquery(expression, context, errors) {
   });
 
   if (subqueryErrors.length) {
+    logger.error("validator.subqueries", "subquery:invalid", { error: subqueryErrors[0] });
     errors.push(subqueryErrors[0]);
   }
 }
@@ -375,6 +405,7 @@ function detectInvalidFunctionLiteral(expression, context, errors) {
   }
 
   errors.push(createQueryError("LogicalError", `Invalid function name '${match[1]}'`, findTokenLocation(context.rawQuery, match[1]), "Use one of COUNT, AVG, SUM, MAX, MIN"));
+  logger.error("validator.errors", "function:invalid-literal", { functionName: match[1] });
 }
 
 function validateAggregateUsage(context, errors) {
@@ -389,6 +420,7 @@ function validateAggregateUsage(context, errors) {
       findTokenLocation(context.rawQuery, expression.raw || expression.alias),
       "Add GROUP BY for the non-aggregated column or remove it from SELECT"
     ));
+    logger.error("validator.aggregates", "aggregate:missing-group-by", { expression: expression.alias || expression.raw });
     return;
   }
 
@@ -407,6 +439,7 @@ function validateAggregateUsage(context, errors) {
       findTokenLocation(context.rawQuery, expression.raw || expression.alias),
       "Add the column to GROUP BY or wrap it in an aggregate"
     ));
+    logger.error("validator.aggregates", "group-by:missing-expression", { expression: expression.alias || expression.raw });
   });
 }
 
@@ -431,6 +464,7 @@ function validateTypeComparisons(context, errors) {
         }
 
         errors.push(createQueryError("TypeError", `Cannot compare ${leftType} with ${rightType}`, findTokenLocation(context.rawQuery, clause.operator), "Use compatible types on both sides of the comparison"));
+        logger.error("validator.types", "comparison:type-mismatch", { operator: clause.operator, leftType, rightType });
       });
     });
 }
@@ -446,6 +480,7 @@ function validateLikeOperands(clause, context, errors) {
       findTokenLocation(context.rawQuery, clause.operator),
       "Use LIKE with text columns or string literals"
     ));
+    logger.error("validator.types", "like:type-mismatch", { clause });
   }
 }
 

@@ -1,10 +1,13 @@
-import { DATABASE, QUERY_SCHEMA } from "./data.js";
-import { KEYWORDS } from "./constants.js";
-import { queryStorage, ThemeStore } from "./storage.js";
-import { QueryParser } from "./query-parser.js";
-import { QueryEngine } from "./query-engine.js";
-import { TableRenderer } from "./table-renderer.js";
-import { validateQuery } from "./query-validator.js";
+import { DATABASE, QUERY_SCHEMA } from "../core/data/data.js";
+import { KEYWORDS } from "../config/constants.js";
+import { queryStorage, ThemeStore } from "../services/storage.js";
+import { QueryParser } from "../core/parser/query-parser.js";
+import { QueryEngine } from "../core/engine/query-engine.js";
+import { TableRenderer } from "./renderer/table-renderer.js";
+import { validateQuery } from "../core/validator/query-validator.js";
+import { createLogger, setGlobalLoggingEnabled } from "../services/dev-logger.js";
+
+const logger = createLogger("App");
 
 export class QueryVisualizerApp {
   constructor() {
@@ -28,6 +31,8 @@ export class QueryVisualizerApp {
     this.engine = new QueryEngine(DATABASE);
     this.renderer = new TableRenderer(this.elements, { sourceData: DATABASE });
     this.themeStore = new ThemeStore();
+    this.developerLogsEnabled = true;
+    setGlobalLoggingEnabled(this.developerLogsEnabled);
     this.executionSteps = [];
     this.steps = [];
     this.stepIndex = 0;
@@ -40,11 +45,13 @@ export class QueryVisualizerApp {
     this.previewContextCounter = 0;
 
     this.saveQuery = this.debounce(() => {
+      logger.debug("query.input", "query:save-requested", { length: this.elements.queryInput.value.length });
       queryStorage.save(this.elements.queryInput.value);
     }, 300);
   }
 
   init() {
+    logger.debug("app.lifecycle", "app:init-start");
     this.themeStore.apply(this.themeStore.getPreferredTheme());
     this.updateThemeLabel();
 
@@ -56,9 +63,11 @@ export class QueryVisualizerApp {
     this.bindEvents();
     this.updateAnimationToggle();
     this.run();
+    logger.debug("app.lifecycle", "app:init-end");
   }
 
   bindEvents() {
+    logger.debug("app.lifecycle", "events:bind");
     this.elements.runButton.addEventListener("click", () => this.run());
     this.elements.animationToggle.addEventListener("click", () => this.toggleAnimations());
     this.elements.prevButton.addEventListener("click", () => this.prevStep());
@@ -72,10 +81,12 @@ export class QueryVisualizerApp {
 
   run() {
     if (this.isAnimating) {
+      logger.debug("app.animation", "run:blocked-during-animation");
       return;
     }
 
     const query = this.elements.queryInput.value.trim();
+    logger.debug("query.lifecycle", "run:start", { query });
     this.engine.setQueryContext(query);
     this.engine.clearError();
     this.queryError = null;
@@ -85,6 +96,25 @@ export class QueryVisualizerApp {
     try {
       this.executionSteps = this.engine.expandExecutionSteps(this.parser.parse(query));
       this.steps = this.buildDisplaySteps(this.executionSteps);
+      logger.debug("app.flow", "run:parse-expand-complete", {
+        executionStepTypes: this.executionSteps.map((step) => step.type),
+        displayStepCount: this.steps.length
+      });
+      logger.debug("highlight.sequence", "execution-order", {
+        query,
+        executionOrder: this.executionSteps.map((step) => step.type),
+        displayExecutionOrder: this.steps.map((step, index) => ({
+          index: index + 1,
+          label: step.displayLabel,
+          type: step.type,
+          kind: step.kind,
+          contextId: step.contextId,
+          highlightKey: step.highlightKey || "",
+          source: step.highlightSource || ""
+        })),
+        executionOrderText: this.executionSteps.map((step) => step.type).join(" -> "),
+        displayExecutionOrderText: this.steps.map((step) => step.displayLabel).join(" -> ")
+      });
     } catch (error) {
       this.executionSteps = [];
       this.steps = [];
@@ -94,6 +124,7 @@ export class QueryVisualizerApp {
         query,
         "Check the SQL syntax and try again"
       );
+      logger.error("app.errors", "run:parse-failed", { error });
     }
 
     if (!this.queryError) {
@@ -105,6 +136,7 @@ export class QueryVisualizerApp {
       if (errors.length) {
         this.queryError = errors[0];
         this.steps = [];
+        logger.error("app.errors", "run:validation-failed", { error: this.queryError });
       }
     }
 
@@ -124,14 +156,26 @@ export class QueryVisualizerApp {
     this.renderer.render([]);
     this.updateStepLabel();
     this.updateButtons();
+    logger.debug("query.lifecycle", "run:ready", { stepCount: this.steps.length });
   }
 
   async nextStep() {
     if (this.queryError || this.stepIndex >= this.steps.length || this.isAnimating) {
+      logger.debug("query.stepNavigation", "next-step:blocked", {
+        hasError: Boolean(this.queryError),
+        stepIndex: this.stepIndex,
+        stepCount: this.steps.length,
+        isAnimating: this.isAnimating
+      });
       return;
     }
 
     const step = this.steps[this.stepIndex];
+    logger.debug("query.stepNavigation", "next-step:start", {
+      stepIndex: this.stepIndex,
+      type: step.type,
+      label: step.displayLabel
+    });
     const previousMainData = this.snapshotDataset(this.currentData);
     const previousVisibleData = this.snapshotDataset(this.visibleData);
     const result = this.applyDisplayStep(step);
@@ -152,6 +196,7 @@ export class QueryVisualizerApp {
     this.updateButtons();
 
     if (!this.animationsEnabled) {
+      logger.debug("app.animation", "next-step:render-without-animation", { step: step.displayLabel });
       this.elements.resultsPanel?.classList.remove("is-animating");
       this.renderer.render(this.visibleData);
       this.updateStepLabel(step);
@@ -161,6 +206,7 @@ export class QueryVisualizerApp {
 
     this.isAnimating = true;
     this.elements.resultsPanel?.classList.add("is-animating");
+    logger.debug("app.animation", "next-step:animation-start", { step: step.displayLabel });
     this.updateStepLabel(step);
     this.updateButtons();
 
@@ -175,6 +221,7 @@ export class QueryVisualizerApp {
     } finally {
       this.isAnimating = false;
       this.elements.resultsPanel?.classList.remove("is-animating");
+      logger.debug("app.animation", "next-step:animation-end", { step: step.displayLabel });
       this.updateStepLabel(step);
       this.updateButtons();
     }
@@ -182,9 +229,15 @@ export class QueryVisualizerApp {
 
   prevStep() {
     if (this.queryError || this.stepIndex === 0 || this.isAnimating) {
+      logger.debug("query.stepNavigation", "prev-step:blocked", {
+        hasError: Boolean(this.queryError),
+        stepIndex: this.stepIndex,
+        isAnimating: this.isAnimating
+      });
       return;
     }
 
+    logger.debug("query.stepNavigation", "prev-step:start", { currentIndex: this.stepIndex });
     const targetIndex = this.stepIndex - 1;
     this.currentData = [];
     this.visibleData = [];
@@ -218,6 +271,7 @@ export class QueryVisualizerApp {
     this.renderer.render(this.visibleData);
     this.updateStepLabel(activeStep);
     this.updateButtons();
+    logger.debug("query.stepNavigation", "prev-step:end", { targetIndex, renderedRows: this.visibleData.length });
   }
 
   renderQuery(query, error = null) {
@@ -266,6 +320,10 @@ export class QueryVisualizerApp {
 
     html += this.escapeHtml(query.slice(cursor));
     this.elements.queryDisplay.innerHTML = html;
+    logger.debug("highlight.sequence", "query:render-highlight-map", {
+      segmentCount: segments.length,
+      sourceTokenCount: sourceTokens.length
+    });
 
     if (!error || !error.location) {
       return;
@@ -307,6 +365,7 @@ export class QueryVisualizerApp {
 
       if (node) {
         node.classList.add("active");
+        logger.debug("highlight.activeClause", "keyword:activated", { highlightKey: step.highlightKey, stepIndex });
       }
     }
 
@@ -319,6 +378,7 @@ export class QueryVisualizerApp {
 
       if (node) {
         node.classList.add("active");
+        logger.debug("highlight.sources", "source:activated", { sourceKey, stepIndex });
       }
     }
   }
@@ -426,7 +486,13 @@ export class QueryVisualizerApp {
     const availableOuterAliases = new Set([...outerAliases, ...localAliases]);
     const typeCounts = new Map();
 
-    return steps.flatMap((step) => this.expandDisplayStep(step, contextId, availableOuterAliases, typeCounts));
+    const displaySteps = steps.flatMap((step) => this.expandDisplayStep(step, contextId, availableOuterAliases, typeCounts));
+    logger.debug("app.previews", "display-steps:built", {
+      contextId,
+      count: displaySteps.length,
+      labels: displaySteps.map((step) => step.displayLabel)
+    });
+    return displaySteps;
   }
 
   expandDisplayStep(step, contextId = "root", outerAliases = new Set(), typeCounts = new Map()) {
@@ -437,15 +503,18 @@ export class QueryVisualizerApp {
       const subqueryContextId = `${contextId}>${clausePath}_subquery_0`;
       const nestedSteps = this.engine.expandExecutionSteps(step.value.subquery);
       displaySteps.push(...this.buildDisplaySteps(nestedSteps, subqueryContextId));
+      logger.debug("app.previews", "derived-subquery:expanded", { contextId, subqueryContextId });
     } else {
       this.collectSubqueriesFromStep(step).forEach((subquery, index) => {
         if (this.isCorrelatedSubquery(subquery.query, outerAliases)) {
+          logger.debug("app.previews", "correlated-subquery:skipped-preview", { contextId, stepType: step.type });
           return;
         }
 
         const subqueryContextId = `${contextId}>${clausePath}_subquery_${index}`;
         const nestedSteps = this.engine.expandExecutionSteps(subquery.query);
         displaySteps.push(...this.buildDisplaySteps(nestedSteps, subqueryContextId, outerAliases));
+        logger.debug("app.previews", "subquery:expanded", { contextId, subqueryContextId, parentStep: step.type });
       });
     }
 
@@ -633,6 +702,7 @@ export class QueryVisualizerApp {
   }
 
   applyDisplayStep(step) {
+    logger.debug("app.flow", "display-step:apply", { type: step.type, kind: step.kind, contextId: step.contextId });
     if (step.kind === "source") {
       return {
         mainData: this.currentData,
@@ -822,10 +892,12 @@ export class QueryVisualizerApp {
 
   toggleAnimations() {
     if (this.isAnimating) {
+      logger.debug("app.animation", "toggle:blocked-during-animation");
       return;
     }
 
     this.animationsEnabled = !this.animationsEnabled;
+    logger.debug("app.animation", "toggle:changed", { enabled: this.animationsEnabled });
     this.updateAnimationToggle();
     this.updateStepLabel(this.steps[this.stepIndex - 1]?.type || "");
   }

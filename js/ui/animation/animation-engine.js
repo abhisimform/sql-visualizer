@@ -1,3 +1,7 @@
+import { createLogger } from "../../services/dev-logger.js";
+
+const logger = createLogger("Animation");
+
 export class AnimationEngine {
   constructor(options = {}) {
     this.duration = options.duration || 260;
@@ -6,9 +10,15 @@ export class AnimationEngine {
     this.settleDelay = options.settleDelay || 220;
     this.maxAnimatedRows = options.maxAnimatedRows || 18;
     this.maxJoinRows = options.maxJoinRows || 8;
+    logger.debug("animation.lifecycle", "animation-engine:constructed", {
+      duration: this.duration,
+      groupDuration: this.groupDuration,
+      joinDuration: this.joinDuration
+    });
   }
 
   async animateRowsDiff({ host, buildFinalState, mode = "rows" }) {
+    logger.debug("animation.transitions", "rows-diff:start", { mode });
     const previousRows = Array.from(host.querySelectorAll("tbody tr[data-row-key]"));
 
     buildFinalState();
@@ -16,6 +26,7 @@ export class AnimationEngine {
 
     const nextRows = Array.from(host.querySelectorAll("tbody tr[data-row-key]"));
     if (!nextRows.length) {
+      logger.debug("animation.skipped", "rows-diff:skipped-no-next-rows");
       return;
     }
 
@@ -23,6 +34,7 @@ export class AnimationEngine {
     const duration = this.getAdaptiveDuration(mode === "reorder" ? this.duration + 60 : this.duration, rowCount, 980);
 
     if (!previousRows.length) {
+      logger.debug("animation.state", "rows-diff:first-render", { animatedRows: nextRows.slice(0, this.maxAnimatedRows).length });
       await this.fadeInRows(nextRows.slice(0, this.maxAnimatedRows), duration);
       await this.wait(this.settleDelay);
       return;
@@ -80,6 +92,7 @@ export class AnimationEngine {
     await this.waitForAnimations(animations, duration);
     overlay.remove();
     await this.wait(this.settleDelay);
+    logger.debug("animation.transitions", "rows-diff:end", { animationCount: animations.length });
   }
 
   async animateGrouping({ host, previousDataset, groupedData, buildFinalState, getRowLabel }) {
@@ -87,6 +100,7 @@ export class AnimationEngine {
     const sampleGroups = groupedData.slice(0, Math.min(8, groupedData.length));
 
     if (!sampleRows.length || !sampleGroups.length) {
+      logger.debug("animation.skipped", "grouping:skipped-insufficient-data", { sampleRows: sampleRows.length, sampleGroups: sampleGroups.length });
       buildFinalState();
       return;
     }
@@ -189,6 +203,7 @@ export class AnimationEngine {
     await this.waitForAnimations(animations, duration + sampleRows.length * 70);
     await this.wait(this.settleDelay + 120);
     buildFinalState();
+    logger.debug("animation.transitions", "grouping:end", { animationCount: animations.length });
   }
 
   async animateJoin({ host, leftDataset, rightDataset, joinMeta, resultDataset, buildFinalState, summarizeRow }) {
@@ -197,6 +212,11 @@ export class AnimationEngine {
     const resultRows = resultDataset.slice(0, this.maxJoinRows);
 
     if (!leftRows.length || !rightRows.length || !resultRows.length) {
+      logger.debug("animation.skipped", "join:skipped-insufficient-data", {
+        leftRows: leftRows.length,
+        rightRows: rightRows.length,
+        resultRows: resultRows.length
+      });
       buildFinalState();
       return;
     }
@@ -270,6 +290,7 @@ export class AnimationEngine {
     await this.waitForAnimations(animations, duration + resultRows.length * 120);
     await this.wait(this.settleDelay + 180);
     buildFinalState();
+    logger.debug("animation.transitions", "join:end", { animationCount: animations.length, mode: joinMeta.mode || "INNER" });
   }
 
   buildJoinPairMeta({ leftRows, rightRows, joinMeta, resultRows }) {
@@ -411,6 +432,7 @@ export class AnimationEngine {
 
   animateElement(element, keyframes, options) {
     if (!element || typeof element.animate !== "function") {
+      logger.debug("animation.skipped", "element-animation:unsupported");
       return null;
     }
 
@@ -427,10 +449,12 @@ export class AnimationEngine {
   async waitForAnimations(animations, fallbackDuration) {
     const active = animations.filter(Boolean);
     if (!active.length) {
+      logger.debug("animation.skipped", "wait-for-animations:no-active", { fallbackDuration });
       await this.wait(fallbackDuration);
       return;
     }
 
+    logger.debug("animation.timings", "wait-for-animations:active", { activeCount: active.length });
     await Promise.all(active.map((animation) => animation.finished.catch(() => undefined)));
   }
 

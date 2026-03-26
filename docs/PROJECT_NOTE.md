@@ -21,7 +21,7 @@ The app is organized into a few clear layers.
 
 ### 1. App Controller
 Main file:
-- `js/app.js`
+- `js/ui/app.js`
 
 Responsibility:
 - coordinates the full query lifecycle
@@ -36,7 +36,7 @@ Think of this as the orchestration layer between UI and SQL logic.
 
 ### 2. Parser
 Main file:
-- `js/query-parser.js`
+- `js/core/parser/query-parser.js`
 
 Responsibility:
 - converts raw SQL text into a lightweight AST-like execution step list
@@ -62,7 +62,7 @@ The parser does not execute anything. It only converts text into structured data
 
 ### 3. Validator
 Main file:
-- `js/query-validator.js`
+- `js/core/validator/query-validator.js`
 
 Responsibility:
 - checks whether a parsed query is valid before execution
@@ -94,10 +94,10 @@ This layer is what makes the system feel closer to a real SQL engine.
 
 ### 4. Execution Engine
 Main file:
-- `js/query-engine.js`
+- `js/core/engine/query-engine.js`
 
 Responsibility:
-- executes validated steps against in-memory tables from `js/data.js`
+- executes validated steps against in-memory tables from `js/core/data/data.js`
 - loads rows from one or more tables
 - applies filtering, grouping, aggregation, projection, sorting, and pagination
 - evaluates joins and derived tables
@@ -110,7 +110,7 @@ The engine is the heart of the SQL behavior.
 
 ### 5. Renderer
 Main file:
-- `js/table-renderer.js`
+- `js/ui/renderer/table-renderer.js`
 
 Responsibility:
 - renders the current dataset for the active execution step
@@ -124,7 +124,7 @@ This layer turns engine output into visible UI.
 
 ### 6. Animation Layer
 Main file:
-- `js/animation-engine.js`
+- `js/ui/animation/animation-engine.js`
 
 Responsibility:
 - animates row filtering/reordering transitions
@@ -136,7 +136,7 @@ This is purely presentation logic. It does not change SQL behavior.
 
 ### 7. Data Layer
 Main file:
-- `js/data.js`
+- `js/core/data/data.js`
 
 Responsibility:
 - stores mock tables such as `EMPLOYEES`, `DEPARTMENTS`, `CUSTOMERS`, `ORDERS`, and others
@@ -147,8 +147,8 @@ This is the in-memory database for the project.
 
 ### 8. Shared Constants and Utilities
 Main files:
-- `js/constants.js`
-- `js/storage.js`
+- `js/config/constants.js`
+- `js/services/storage.js`
 
 Responsibility:
 - shared SQL keyword definitions
@@ -162,6 +162,7 @@ At a high level, the app works like this:
 
 1. User writes a query in the editor.
 2. `app.js` sends it to the parser.
+   More precisely: `js/ui/app.js` sends it to the parser.
 3. The parser returns execution steps.
 4. The engine expands some steps internally:
    - comma-separated `FROM` sources
@@ -243,18 +244,30 @@ Important detail:
 
 ## Files and Roles
 - `index.html`: page structure and UI shell
-- `style.css`: themes, layout, table styles, highlight styles, animation-stage styling
+- `css/style.css`: themes, layout, table styles, highlight styles, animation-stage styling
 - `js/main.js`: app bootstrap
-- `js/app.js`: overall controller, execution stepping, highlighting, UI coordination
-- `js/query-parser.js`: SQL text to structured steps
-- `js/query-engine.js`: clause execution logic
-- `js/query-validator.js`: validation and error generation
-- `js/table-renderer.js`: result rendering and copy action
-- `js/animation-engine.js`: transition and visualization animation logic
-- `js/storage.js`: theme/query persistence helpers
-- `js/constants.js`: keywords, mappings, storage keys
-- `js/data.js`: mock data and schema
-- `QUERY_SUPPORT.md`: supported query families, examples, and current limitations
+- `js/ui/app.js`: overall controller, execution stepping, highlighting, UI coordination
+- `js/core/parser/query-parser.js`: SQL text to structured steps
+- `js/core/engine/query-engine.js`: clause execution logic
+- `js/core/validator/query-validator.js`: validation and error generation
+- `js/ui/renderer/table-renderer.js`: result rendering and copy action
+- `js/ui/animation/animation-engine.js`: transition and visualization animation logic
+- `js/services/storage.js`: theme/query persistence helpers
+- `js/services/dev-logger.js`: developer-only structured instrumentation and log controls
+- `js/config/constants.js`: keywords, mappings, storage keys
+- `js/core/data/data.js`: mock data and schema
+- `docs/QUERY_SUPPORT.md`: supported query families, examples, and current limitations
+- `docs/README.md`: documentation entry point
+
+## Current Structure
+- `index.html`: root HTML shell
+- `css/`: visual styles
+- `docs/`: project documentation
+- `js/core/`: parser, validator, engine, and in-memory data
+- `js/ui/`: app orchestration, rendering, and animation
+- `js/services/`: side-effect utilities like storage and developer logging
+- `js/config/`: shared configuration and constants
+- `js/main.js`: browser entry point
 
 ## Design Principles
 - Keep parser, validator, engine, renderer, and animation logic separate.
@@ -272,7 +285,7 @@ Important detail:
 - Improved query display chips and active-step highlighting.
 
 ## Notes
-- The app is designed so UI changes stay mostly isolated in `index.html`, `style.css`, `js/table-renderer.js`, and `js/animation-engine.js` without forcing changes in SQL execution logic.
+- The app is designed so UI changes stay mostly isolated in `index.html`, `css/style.css`, `js/ui/renderer/table-renderer.js`, and `js/ui/animation/animation-engine.js` without forcing changes in SQL execution logic.
 - Query execution and display concerns are intentionally separated to make future refactors easier.
-- `QUERY_SUPPORT.md` should be updated whenever SQL capability changes.
-- If a feature seems broken in the UI but works in the engine, check `js/app.js` first because nested-step preview and highlight logic live there.
+- `docs/QUERY_SUPPORT.md` should be updated whenever SQL capability changes.
+- If a feature seems broken in the UI but works in the engine, check `js/ui/app.js` first because nested-step preview and highlight logic live there.
