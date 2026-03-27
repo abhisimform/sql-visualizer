@@ -57,6 +57,38 @@
           <button id="prevButton" class="button button-secondary" type="button">Previous Step</button>
           <button id="nextButton" class="button button-secondary" type="button">Next Step</button>
         </div>
+
+        <details class="info-section" open>
+          <summary>Sample Queries</summary>
+          <div class="info-section-body">
+            <div class="sample-query-controls">
+              <label class="field-label" for="sampleQuerySelect">Choose a sample query</label>
+              <select id="sampleQuerySelect" class="metadata-select">
+                <option value="">Select a sample query</option>
+              </select>
+            </div>
+
+            <div class="sample-query-actions">
+              <button id="loadSampleButton" class="button button-secondary" type="button">Load Sample</button>
+            </div>
+
+            <div id="sampleQueryInfo" class="metadata-host" aria-live="polite"></div>
+          </div>
+        </details>
+
+        <details class="info-section">
+          <summary>Join Guidance</summary>
+          <div class="info-section-body">
+            <div id="joinGuidancePanel" class="metadata-host" aria-live="polite"></div>
+          </div>
+        </details>
+
+        <details class="info-section">
+          <summary>Common SQL Mistakes</summary>
+          <div class="info-section-body">
+            <div id="errorLearningPanel" class="metadata-host" aria-live="polite"></div>
+          </div>
+        </details>
       </section>
 
       <section class="panel panel-results">

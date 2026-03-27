@@ -1,4 +1,4 @@
-import { DATABASE, QUERY_SCHEMA } from "../core/data/data.js";
+import { DATABASE, QUERY_SCHEMA, SAMPLE_QUERIES } from "../core/data/data.js";
 import { KEYWORDS } from "../config/constants.js";
 import { queryStorage, ThemeStore } from "../services/storage.js";
 import { QueryParser } from "../core/parser/query-parser.js";
@@ -6,6 +6,16 @@ import { QueryEngine } from "../core/engine/query-engine.js";
 import { TableRenderer } from "./renderer/table-renderer.js";
 import { validateQuery } from "../core/validator/query-validator.js";
 import { createLogger, setGlobalLoggingEnabled } from "../services/dev-logger.js";
+import {
+  buildErrorInfoCardData,
+  buildQueryInfoCardData,
+  buildTableInfoCardData,
+  formatPreviewAsObjects,
+  getAllErrorCases,
+  getJoinSuggestions,
+  getQueryMetadata,
+  getSuggestedJoinSQL
+} from "../core/data/metadataHelpers.js";
 
 const logger = createLogger("App");
 
@@ -24,7 +34,12 @@ export class QueryVisualizerApp {
       table: document.getElementById("table"),
       resultsPanel: document.querySelector(".panel-results"),
       themeToggle: document.getElementById("themeToggle"),
-      themeLabel: document.getElementById("themeLabel")
+      themeLabel: document.getElementById("themeLabel"),
+      sampleQuerySelect: document.getElementById("sampleQuerySelect"),
+      loadSampleButton: document.getElementById("loadSampleButton"),
+      sampleQueryInfo: document.getElementById("sampleQueryInfo"),
+      joinGuidancePanel: document.getElementById("joinGuidancePanel"),
+      errorLearningPanel: document.getElementById("errorLearningPanel")
     };
 
     this.parser = new QueryParser();
@@ -43,6 +58,7 @@ export class QueryVisualizerApp {
     this.animationsEnabled = false;
     this.previewState = new Map();
     this.previewContextCounter = 0;
+    this.selectedSampleId = null;
 
     this.saveQuery = this.debounce(() => {
       logger.debug("query.input", "query:save-requested", { length: this.elements.queryInput.value.length });
@@ -61,6 +77,7 @@ export class QueryVisualizerApp {
     }
 
     this.bindEvents();
+    this.initializeMetadataExperience();
     this.updateAnimationToggle();
     this.run();
     logger.debug("app.lifecycle", "app:init-end");
@@ -77,6 +94,79 @@ export class QueryVisualizerApp {
       this.themeStore.toggle();
       this.updateThemeLabel();
     });
+    this.elements.sampleQuerySelect?.addEventListener("change", (event) => {
+      this.handleSampleSelection(event.target.value);
+    });
+    this.elements.loadSampleButton?.addEventListener("click", () => {
+      this.loadSelectedSampleQuery();
+    });
+  }
+
+  initializeMetadataExperience() {
+    this.populateSampleQueryOptions();
+    this.syncSelectedSampleFromQuery(this.elements.queryInput.value);
+    this.renderSelectedSampleInfo();
+    this.renderJoinGuidance(this.elements.queryInput.value);
+    this.renderErrorLearningPanel();
+  }
+
+  populateSampleQueryOptions() {
+    if (!this.elements.sampleQuerySelect) {
+      return;
+    }
+
+    const options = (Array.isArray(SAMPLE_QUERIES) ? SAMPLE_QUERIES : []).map((query) => {
+      const difficulty = query?.difficulty ? ` [${query.difficulty}]` : "";
+      const topic = query?.topic ? ` ${query.topic}` : "";
+      return `<option value="${query.id}">${this.escapeHtml(`${query.id}. ${query.title || "Untitled"}${difficulty}${topic ? ` • ${topic}` : ""}`)}</option>`;
+    });
+
+    this.elements.sampleQuerySelect.innerHTML = [
+      '<option value="">Select a sample query</option>',
+      ...options
+    ].join("");
+
+    if (this.selectedSampleId) {
+      this.elements.sampleQuerySelect.value = String(this.selectedSampleId);
+    }
+  }
+
+  syncSelectedSampleFromQuery(queryText) {
+    const normalizedQuery = String(queryText || "").trim();
+    const matchedQuery = (Array.isArray(SAMPLE_QUERIES) ? SAMPLE_QUERIES : []).find(
+      (query) => String(query?.query || "").trim() === normalizedQuery
+    );
+
+    this.selectedSampleId = matchedQuery?.id || null;
+
+    if (this.elements.sampleQuerySelect) {
+      this.elements.sampleQuerySelect.value = this.selectedSampleId ? String(this.selectedSampleId) : "";
+    }
+  }
+
+  handleSampleSelection(queryId) {
+    const normalizedId = Number(queryId);
+    this.selectedSampleId = Number.isFinite(normalizedId) && normalizedId > 0 ? normalizedId : null;
+    this.renderSelectedSampleInfo();
+    this.renderJoinGuidance(this.elements.queryInput.value);
+  }
+
+  loadSelectedSampleQuery() {
+    if (!this.selectedSampleId) {
+      return;
+    }
+
+    const metadata = getQueryMetadata(this.selectedSampleId);
+    const nextQuery = metadata?.query || "";
+
+    if (!nextQuery) {
+      return;
+    }
+
+    this.elements.queryInput.value = nextQuery;
+    queryStorage.save(nextQuery);
+    this.renderSelectedSampleInfo();
+    this.run();
   }
 
   run() {
@@ -86,6 +176,7 @@ export class QueryVisualizerApp {
     }
 
     const query = this.elements.queryInput.value.trim();
+    this.syncSelectedSampleFromQuery(query);
     logger.debug("query.lifecycle", "run:start", { query });
     this.engine.setQueryContext(query);
     this.engine.clearError();
@@ -144,6 +235,8 @@ export class QueryVisualizerApp {
     this.currentData = [];
     this.visibleData = [];
     this.renderQuery(query, this.queryError);
+    this.renderSelectedSampleInfo();
+    this.renderJoinGuidance(query);
     this.clearHighlight();
 
     if (this.queryError) {
@@ -873,8 +966,238 @@ export class QueryVisualizerApp {
     return indexes;
   }
 
+  renderSelectedSampleInfo() {
+    if (!this.elements.sampleQueryInfo) {
+      return;
+    }
+
+    if (!this.selectedSampleId) {
+      this.elements.sampleQueryInfo.innerHTML = `
+        <p class="metadata-empty">Select a sample query to view its explanation and example output.</p>
+      `;
+      return;
+    }
+
+    const cardData = buildQueryInfoCardData(this.selectedSampleId);
+    const metadata = getQueryMetadata(this.selectedSampleId);
+    const previewRows = formatPreviewAsObjects(this.selectedSampleId);
+
+    if (!cardData && !metadata) {
+      this.elements.sampleQueryInfo.innerHTML = `
+        <p class="metadata-empty">Metadata for this sample query is not available.</p>
+      `;
+      return;
+    }
+
+    const resolved = {
+      ...(metadata || {}),
+      ...(cardData || {})
+    };
+    const previewColumns = Array.isArray(resolved.preview?.columns) ? resolved.preview.columns : [];
+    const previewNote = resolved.preview?.note ? `<p class="metadata-note">${this.escapeHtml(resolved.preview.note)}</p>` : "";
+
+    this.elements.sampleQueryInfo.innerHTML = `
+      <article class="metadata-card">
+        <div class="metadata-card-header">
+          <div>
+            <p class="metadata-kicker">Selected Sample</p>
+            <h3>${this.escapeHtml(resolved.title || "Untitled Query")}</h3>
+          </div>
+          <div class="metadata-chip-row">
+            <span class="panel-badge">${this.escapeHtml(resolved.difficulty || "Unknown")}</span>
+            <span class="panel-badge">${this.escapeHtml(resolved.topic || "General")}</span>
+          </div>
+        </div>
+        <p class="metadata-copy">${this.escapeHtml(resolved.explanation || "No explanation available.")}</p>
+        <pre class="metadata-code"><code>${this.escapeHtml(resolved.query || "")}</code></pre>
+        ${previewRows.length && previewColumns.length ? `
+          <div class="metadata-preview-block">
+            <div class="panel-heading compact">
+              <h3>Expected Preview</h3>
+              <span class="panel-badge">Display only</span>
+            </div>
+            ${this.renderMetadataTable(previewColumns, previewRows)}
+            ${previewNote}
+          </div>
+        ` : ""}
+      </article>
+    `;
+  }
+
+  renderJoinGuidance(queryText = "") {
+    if (!this.elements.joinGuidancePanel) {
+      return;
+    }
+
+    const tableNames = this.collectRelevantTableNames(queryText);
+    const suggestions = getJoinSuggestions(tableNames);
+    const tableCards = tableNames
+      .map((tableName) => buildTableInfoCardData(tableName))
+      .filter(Boolean)
+      .map((tableInfo) => `
+        <article class="metadata-mini-card">
+          <h3>${this.escapeHtml(tableInfo.table_name || "Table")}</h3>
+          <p class="metadata-copy">${this.escapeHtml(tableInfo.description?.purpose || "Table details are not available.")}</p>
+          <p class="metadata-note">
+            Primary key: ${this.escapeHtml(tableInfo.description?.primary_key || "Unknown")}
+          </p>
+        </article>
+      `)
+      .join("");
+
+    if (!tableNames.length) {
+      this.elements.joinGuidancePanel.innerHTML = `
+        <p class="metadata-empty">Run a query with multiple tables, or pick a join sample, to see suggested join paths.</p>
+      `;
+      return;
+    }
+
+    const suggestionMarkup = suggestions.length
+      ? suggestions.map((suggestion) => {
+        const suggestedSql = getSuggestedJoinSQL(suggestion.from_table, suggestion.to_table);
+        return `
+          <article class="metadata-card">
+            <div class="metadata-card-header">
+              <div>
+                <p class="metadata-kicker">Suggested Path</p>
+                <h3>${this.escapeHtml(`${suggestion.from_table} ↔ ${suggestion.to_table}`)}</h3>
+              </div>
+              <span class="panel-badge">${suggestion.steps.length} step${suggestion.steps.length === 1 ? "" : "s"}</span>
+            </div>
+            <p class="metadata-copy">${this.escapeHtml(suggestion.summary || "No join path available.")}</p>
+            ${suggestedSql ? `<pre class="metadata-code"><code>${this.escapeHtml(suggestedSql)}</code></pre>` : ""}
+          </article>
+        `;
+      }).join("")
+      : `
+        <p class="metadata-empty">No join guidance metadata was found for the currently detected table combination.</p>
+      `;
+
+    this.elements.joinGuidancePanel.innerHTML = `
+      ${tableCards ? `<div class="metadata-grid">${tableCards}</div>` : ""}
+      ${suggestionMarkup}
+    `;
+  }
+
+  renderErrorLearningPanel() {
+    if (!this.elements.errorLearningPanel) {
+      return;
+    }
+
+    const errorCases = getAllErrorCases()
+      .map((errorCase) => buildErrorInfoCardData(errorCase?.id))
+      .filter(Boolean);
+
+    if (!errorCases.length) {
+      this.elements.errorLearningPanel.innerHTML = `
+        <p class="metadata-empty">No error-case metadata is available right now.</p>
+      `;
+      return;
+    }
+
+    this.elements.errorLearningPanel.innerHTML = errorCases.map((errorCase) => `
+      <article class="metadata-card">
+        <div class="metadata-card-header">
+          <div>
+            <p class="metadata-kicker">Error Case</p>
+            <h3>${this.escapeHtml(errorCase.title || "SQL mistake")}</h3>
+          </div>
+          <span class="panel-badge">${this.escapeHtml(errorCase.concept || "SQL")}</span>
+        </div>
+        <div class="metadata-stack">
+          <div>
+            <p class="field-label">Wrong Query</p>
+            <pre class="metadata-code"><code>${this.escapeHtml(errorCase.wrong_query || "")}</code></pre>
+          </div>
+          <p class="metadata-copy">${this.escapeHtml(errorCase.why_it_fails || "")}</p>
+          <div>
+            <p class="field-label">Corrected Query</p>
+            <pre class="metadata-code"><code>${this.escapeHtml(errorCase.corrected_query || "")}</code></pre>
+          </div>
+        </div>
+      </article>
+    `).join("");
+  }
+
+  collectRelevantTableNames(queryText = "") {
+    if (this.selectedSampleId) {
+      const metadata = getQueryMetadata(this.selectedSampleId);
+      const sampleTables = this.extractTablesFromQueryText(metadata?.query || "");
+      if (sampleTables.length) {
+        return sampleTables;
+      }
+    }
+
+    const executionTables = this.extractTablesFromExecutionSteps(this.executionSteps);
+    if (executionTables.length) {
+      return executionTables;
+    }
+
+    return this.extractTablesFromQueryText(queryText);
+  }
+
+  extractTablesFromExecutionSteps(steps = []) {
+    const tables = new Set();
+
+    (Array.isArray(steps) ? steps : []).forEach((step) => {
+      if (step?.type === "FROM" && step.value?.table) {
+        tables.add(String(step.value.table).toUpperCase());
+      }
+
+      if (step?.type === "JOIN" && step.value?.source?.table) {
+        tables.add(String(step.value.source.table).toUpperCase());
+      }
+    });
+
+    return [...tables];
+  }
+
+  extractTablesFromQueryText(queryText = "") {
+    const matches = String(queryText || "").matchAll(/\b(?:FROM|JOIN)\s+([A-Z_][A-Z0-9_]*)/gi);
+    const tables = new Set();
+
+    for (const match of matches) {
+      if (match?.[1]) {
+        tables.add(String(match[1]).toUpperCase());
+      }
+    }
+
+    return [...tables];
+  }
+
+  renderMetadataTable(columns = [], rows = []) {
+    const safeColumns = Array.isArray(columns) ? columns : [];
+    const safeRows = Array.isArray(rows) ? rows : [];
+
+    if (!safeColumns.length || !safeRows.length) {
+      return "";
+    }
+
+    const headerMarkup = safeColumns
+      .map((column) => `<th scope="col">${this.escapeHtml(column)}</th>`)
+      .join("");
+    const rowMarkup = safeRows
+      .map((row) => `
+        <tr>
+          ${safeColumns.map((column) => `<td>${this.escapeHtml(row?.[column] ?? "")}</td>`).join("")}
+        </tr>
+      `)
+      .join("");
+
+    return `
+      <div class="table-scroll metadata-table-scroll">
+        <table class="data-table metadata-table">
+          <thead>
+            <tr>${headerMarkup}</tr>
+          </thead>
+          <tbody>${rowMarkup}</tbody>
+        </table>
+      </div>
+    `;
+  }
+
   escapeHtml(value) {
-    return String(value || "")
+    return String(value ?? "")
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")
