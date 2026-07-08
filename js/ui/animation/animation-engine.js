@@ -1,4 +1,5 @@
 import { createLogger } from "../../services/dev-logger.js";
+import { getLeafClauses } from "../../core/parser/query-parser.js";
 
 const logger = createLogger("Animation");
 
@@ -296,7 +297,8 @@ export class AnimationEngine {
   buildJoinPairMeta({ leftRows, rightRows, joinMeta, resultRows }) {
     const mode = String(joinMeta.mode || "INNER").toUpperCase();
     const rightAlias = joinMeta.source?.alias || joinMeta.source?.table || "right";
-    const clause = joinMeta.condition?.clauses?.[0] || {};
+    const leafClauses = getLeafClauses(joinMeta.condition);
+    const clause = leafClauses[0] || {};
     const leftQualifier = clause.left?.qualifier === rightAlias ? clause.right?.qualifier : clause.left?.qualifier;
     const leftKeys = new Set();
     const rightKeys = new Set();

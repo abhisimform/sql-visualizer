@@ -1,7 +1,9 @@
 import { createLogger } from "../../services/dev-logger.js";
+import { getLeafClauses } from "../parser/query-parser.js";
 
 const CLAUSE_SEQUENCE = ["SELECT", "FROM", "WHERE", "GROUP BY", "HAVING", "ORDER BY", "OFFSET", "LIMIT"];
 const BUILT_IN_FUNCTIONS = new Set(["COUNT", "AVG", "SUM", "MAX", "MIN"]);
+const SUPPORTED_SCALAR_FUNCTIONS = new Set(["LOWER", "UPPER", "ROUND"]);
 const PSEUDO_COLUMNS = new Set(["group", "groupkey", "count"]);
 const CONDITION_TYPE_EXEMPT_OPERATORS = new Set(["IN", "NOT IN", "LIKE", "NOT LIKE", "BETWEEN", "NOT BETWEEN", "IS NULL", "IS NOT NULL", "EXISTS", "NOT EXISTS"]);
 const logger = createLogger("Validator");
@@ -247,7 +249,7 @@ function validateExpressionsInAst(context, errors) {
     }
 
     if (step.type === "WHERE" || step.type === "HAVING") {
-      step.value.clauses.forEach((clause) => {
+      getLeafClauses(step.value).forEach((clause) => {
         validateExpression(clause.left, context, errors, step.type);
         validateExpression(clause.right, context, errors, step.type);
       });
@@ -255,7 +257,7 @@ function validateExpressionsInAst(context, errors) {
     }
 
     if (step.type === "JOIN" && step.value?.condition) {
-      step.value.condition.clauses.forEach((clause) => {
+      getLeafClauses(step.value.condition).forEach((clause) => {
         validateExpression(clause.left, context, errors, step.type);
         validateExpression(clause.right, context, errors, step.type);
       });
@@ -294,8 +296,41 @@ function validateExpression(expression, context, errors, stepType = "") {
       }
       detectInvalidFunctionLiteral(expression, context, errors);
       return;
+    case "function":
+      validateFunction(expression, context, errors, stepType);
+      return;
+    case "case":
+      validateCaseExpression(expression, context, errors, stepType);
+      return;
     default:
       return;
+  }
+}
+
+function validateFunction(expression, context, errors, stepType) {
+  if (!SUPPORTED_SCALAR_FUNCTIONS.has(expression.fn.toUpperCase())) {
+    errors.push(createQueryError(
+      "LogicalError",
+      `Invalid function name '${expression.fn}'`,
+      findTokenLocation(context.rawQuery, expression.fn),
+      "Use one of LOWER, UPPER, ROUND"
+    ));
+    logger.error("validator.functions", "function:invalid-name", { fn: expression.fn });
+    return;
+  }
+  expression.arguments.forEach((arg) => validateExpression(arg, context, errors, stepType));
+}
+
+function validateCaseExpression(expression, context, errors, stepType) {
+  expression.cases.forEach((item) => {
+    getLeafClauses(item.condition).forEach((clause) => {
+      validateExpression(clause.left, context, errors, stepType);
+      validateExpression(clause.right, context, errors, stepType);
+    });
+    validateExpression(item.value, context, errors, stepType);
+  });
+  if (expression.fallback) {
+    validateExpression(expression.fallback, context, errors, stepType);
   }
 }
 
@@ -400,11 +435,11 @@ function detectInvalidFunctionLiteral(expression, context, errors) {
   }
 
   const functionName = match[1].toUpperCase();
-  if (BUILT_IN_FUNCTIONS.has(functionName)) {
+  if (BUILT_IN_FUNCTIONS.has(functionName) || SUPPORTED_SCALAR_FUNCTIONS.has(functionName)) {
     return;
   }
 
-  errors.push(createQueryError("LogicalError", `Invalid function name '${match[1]}'`, findTokenLocation(context.rawQuery, match[1]), "Use one of COUNT, AVG, SUM, MAX, MIN"));
+  errors.push(createQueryError("LogicalError", `Invalid function name '${match[1]}'`, findTokenLocation(context.rawQuery, match[1]), "Use one of COUNT, AVG, SUM, MAX, MIN, LOWER, UPPER, ROUND"));
   logger.error("validator.errors", "function:invalid-literal", { functionName: match[1] });
 }
 
@@ -447,7 +482,8 @@ function validateTypeComparisons(context, errors) {
   context.ast
     .filter((step) => step.type === "WHERE" || step.type === "HAVING" || step.type === "JOIN")
     .forEach((step) => {
-      const clauses = step.type === "JOIN" ? step.value?.condition?.clauses || [] : step.value.clauses;
+      const conditionObj = step.type === "JOIN" ? step.value?.condition : step.value;
+      const clauses = getLeafClauses(conditionObj);
       clauses.forEach((clause) => {
         if (CONDITION_TYPE_EXEMPT_OPERATORS.has(clause.operator)) {
           if (clause.operator === "LIKE" || clause.operator === "NOT LIKE") {

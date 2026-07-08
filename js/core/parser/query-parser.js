@@ -245,27 +245,111 @@ export class QueryParser {
 
   parseCondition(expression) {
     const normalized = expression.replace(/\s+/g, " ").trim();
-    const connectors = [];
-    const parts = this.splitConditionParts(normalized);
-    const clauses = [];
+    const parsed = this.parseConditionRecursive(normalized);
+    
+    let result;
+    if (parsed && parsed.clauses) {
+      result = parsed;
+    } else if (parsed) {
+      result = { raw: normalized, clauses: [parsed], connectors: [] };
+    } else {
+      result = { raw: normalized, clauses: [], connectors: [] };
+    }
+    
+    logger.debug("parser.conditions", "condition:parsed", { expression: normalized, result });
+    return result;
+  }
 
-    parts.forEach((part, index) => {
-      if (index % 2 === 1) {
-        connectors.push(part.toUpperCase());
-        return;
+  parseConditionRecursive(expression) {
+    const trimmed = expression.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    if (trimmed.startsWith("(") && trimmed.endsWith(")")) {
+      let depth = 0;
+      let matching = true;
+      for (let index = 0; index < trimmed.length; index += 1) {
+        const char = trimmed[index];
+        if (char === "(") {
+          depth += 1;
+        } else if (char === ")") {
+          depth -= 1;
+        }
+        if (depth === 0 && index < trimmed.length - 1) {
+          matching = false;
+          break;
+        }
       }
-
-      const clause = this.parseConditionClause(part);
-      if (!clause) {
-        logger.warn("parser.conditions", "condition-clause:skipped", { part });
-        return;
+      if (matching) {
+        return this.parseConditionRecursive(trimmed.slice(1, -1));
       }
+    }
 
-      clauses.push(clause);
-    });
+    const parts = this.splitConditionParts(trimmed);
 
-    logger.debug("parser.conditions", "condition:parsed", { expression: normalized, clauses, connectors });
-    return { raw: normalized, clauses, connectors };
+    const hasOr = parts.some((part) => part === "OR");
+    if (hasOr) {
+      const groups = this.splitPartsByConnector(parts, "OR");
+      const clauses = [];
+      const connectors = [];
+      
+      groups.forEach((group, index) => {
+        const groupStr = group.join(" ");
+        const parsedPart = this.parseConditionRecursive(groupStr);
+        if (parsedPart) {
+          if (parsedPart.clauses) {
+            clauses.push({ kind: "nested", condition: parsedPart });
+          } else {
+            clauses.push(parsedPart);
+          }
+        }
+        if (index < groups.length - 1) {
+          connectors.push("OR");
+        }
+      });
+      return { raw: trimmed, clauses, connectors };
+    }
+
+    const hasAnd = parts.some((part) => part === "AND");
+    if (hasAnd) {
+      const groups = this.splitPartsByConnector(parts, "AND");
+      const clauses = [];
+      const connectors = [];
+      
+      groups.forEach((group, index) => {
+        const groupStr = group.join(" ");
+        const parsedPart = this.parseConditionRecursive(groupStr);
+        if (parsedPart) {
+          if (parsedPart.clauses) {
+            clauses.push({ kind: "nested", condition: parsedPart });
+          } else {
+            clauses.push(parsedPart);
+          }
+        }
+        if (index < groups.length - 1) {
+          connectors.push("AND");
+        }
+      });
+      return { raw: trimmed, clauses, connectors };
+    }
+
+    return this.parseConditionClause(trimmed);
+  }
+
+  splitPartsByConnector(parts, connector) {
+    const groups = [];
+    let currentGroup = [];
+    for (const part of parts) {
+      if (part === connector) {
+        groups.push(currentGroup);
+        currentGroup = [];
+      } else {
+        currentGroup.push(part);
+      }
+    }
+    groups.push(currentGroup);
+    return groups;
   }
 
   parseConditionClause(expression) {
@@ -443,6 +527,31 @@ export class QueryParser {
     const trimmed = expression.trim();
     if (!trimmed) {
       return { kind: "literal", value: "", raw: "" };
+    }
+
+    if (trimmed.toUpperCase().startsWith("CASE ") && trimmed.toUpperCase().endsWith(" END")) {
+      const inner = trimmed.slice(5, -4).trim();
+      const tokens = this.tokenizeCaseExpression(inner);
+      if (tokens) {
+        return {
+          kind: "case",
+          ...tokens,
+          raw: trimmed
+        };
+      }
+    }
+
+    const funcMatch = trimmed.match(/^(LOWER|UPPER|ROUND)\((.*?)\)$/i);
+    if (funcMatch) {
+      const fn = funcMatch[1].toUpperCase();
+      const args = this.splitTopLevel(funcMatch[2], ",");
+      logger.debug("parser.expressions", "expression:function-detected", { expression: trimmed, fn });
+      return {
+        kind: "function",
+        fn,
+        arguments: args.map((arg) => this.parseExpression(arg)),
+        raw: trimmed
+      };
     }
 
     const unwrapped = this.unwrapOuterParentheses(trimmed);
@@ -711,4 +820,99 @@ export class QueryParser {
 
     return -1;
   }
+
+  tokenizeCaseExpression(inner) {
+    const upper = inner.toUpperCase();
+    const keywords = [];
+    let depth = 0;
+    
+    let index = 0;
+    while (index < inner.length) {
+      const char = inner[index];
+      if (char === "(") {
+        depth += 1;
+        index += 1;
+        continue;
+      }
+      if (char === ")") {
+        depth = Math.max(0, depth - 1);
+        index += 1;
+        continue;
+      }
+      
+      if (depth === 0) {
+        const whenMatch = upper.slice(index).match(/^WHEN\b/i);
+        if (whenMatch) {
+          keywords.push({ type: "WHEN", index });
+          index += 4;
+          continue;
+        }
+        const thenMatch = upper.slice(index).match(/^THEN\b/i);
+        if (thenMatch) {
+          keywords.push({ type: "THEN", index });
+          index += 4;
+          continue;
+        }
+        const elseMatch = upper.slice(index).match(/^ELSE\b/i);
+        if (elseMatch) {
+          keywords.push({ type: "ELSE", index });
+          index += 4;
+          continue;
+        }
+      }
+      index += 1;
+    }
+    
+    const cases = [];
+    let elseExpr = null;
+    
+    for (let i = 0; i < keywords.length; i++) {
+      const current = keywords[i];
+      if (current.type === "WHEN") {
+        const nextThen = keywords[i + 1];
+        if (!nextThen || nextThen.type !== "THEN") return null;
+        
+        const whenStart = current.index + 4;
+        const whenEnd = nextThen.index;
+        const conditionStr = inner.slice(whenStart, whenEnd).trim();
+        
+        const nextKeyword = keywords[i + 2];
+        const thenStart = nextThen.index + 4;
+        const thenEnd = nextKeyword ? nextKeyword.index : inner.length;
+        const thenStr = inner.slice(thenStart, thenEnd).trim();
+        
+        cases.push({
+          condition: this.parseCondition(conditionStr),
+          value: this.parseExpression(thenStr)
+        });
+        i++;
+      } else if (current.type === "ELSE") {
+        const elseStart = current.index + 4;
+        const elseEnd = inner.length;
+        const elseStr = inner.slice(elseStart, elseEnd).trim();
+        elseExpr = this.parseExpression(elseStr);
+      }
+    }
+    
+    if (cases.length === 0) return null;
+    return { cases, fallback: elseExpr };
+  }
+}
+
+export function getLeafClauses(condition) {
+  if (!condition || !condition.clauses) {
+    return [];
+  }
+  const leafClauses = [];
+  const collect = (cond) => {
+    cond.clauses.forEach((clause) => {
+      if (clause.kind === "nested") {
+        collect(clause.condition);
+      } else {
+        leafClauses.push(clause);
+      }
+    });
+  };
+  collect(condition);
+  return leafClauses;
 }

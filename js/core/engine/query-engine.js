@@ -311,16 +311,31 @@ export class QueryEngine {
 
       return {
         ...step,
-        value: {
-          ...step.value,
-          clauses: step.value.clauses.map((clause) => ({
-            ...clause,
-            left: this.replaceAliasReference(clause.left, aliasMap),
-            right: this.replaceAliasReference(clause.right, aliasMap)
-          }))
-        }
+        value: this.resolveHavingAliasesInCondition(step.value, aliasMap)
       };
     });
+  }
+
+  resolveHavingAliasesInCondition(condition, aliasMap) {
+    if (!condition || !condition.clauses) {
+      return condition;
+    }
+    return {
+      ...condition,
+      clauses: condition.clauses.map((clause) => {
+        if (clause.kind === "nested") {
+          return {
+            ...clause,
+            condition: this.resolveHavingAliasesInCondition(clause.condition, aliasMap)
+          };
+        }
+        return {
+          ...clause,
+          left: this.replaceAliasReference(clause.left, aliasMap),
+          right: this.replaceAliasReference(clause.right, aliasMap)
+        };
+      })
+    };
   }
 
   replaceAliasReference(expression, aliasMap) {
@@ -893,9 +908,47 @@ export class QueryEngine {
         return expression.values.map((value) => this.resolveExpression(source, value, scopes, representativeRow));
       case "star":
         return "*";
+      case "function":
+        return this.evaluateFunction(source, expression, scopes, representativeRow);
+      case "case":
+        return this.evaluateCaseExpression(source, expression, scopes, representativeRow);
       default:
         return undefined;
     }
+  }
+
+  evaluateFunction(source, expression, scopes, representativeRow) {
+    const resolvedArgs = expression.arguments.map((arg) => this.resolveExpression(source, arg, scopes, representativeRow));
+    const fn = expression.fn.toUpperCase();
+    
+    switch (fn) {
+      case "LOWER":
+        return resolvedArgs[0] !== null && resolvedArgs[0] !== undefined ? String(resolvedArgs[0]).toLowerCase() : null;
+      case "UPPER":
+        return resolvedArgs[0] !== null && resolvedArgs[0] !== undefined ? String(resolvedArgs[0]).toUpperCase() : null;
+      case "ROUND": {
+        const val = Number(resolvedArgs[0]);
+        const decimals = resolvedArgs[1] !== undefined ? Number(resolvedArgs[1]) : 0;
+        if (isNaN(val) || isNaN(decimals)) return null;
+        return Number(val.toFixed(decimals));
+      }
+      default:
+        return null;
+    }
+  }
+
+  evaluateCaseExpression(source, expression, scopes, representativeRow) {
+    for (const item of expression.cases) {
+      const activeScopes = representativeRow ? [representativeRow, source, ...scopes] : [source, ...scopes];
+      const matched = this.matchesCondition(source, item.condition, activeScopes);
+      if (matched) {
+        return this.resolveExpression(source, item.value, scopes, representativeRow);
+      }
+    }
+    if (expression.fallback) {
+      return this.resolveExpression(source, expression.fallback, scopes, representativeRow);
+    }
+    return null;
   }
 
   resolveColumnValue(source, expression, scopes, representativeRow) {
@@ -1097,13 +1150,32 @@ export class QueryEngine {
     const results = condition.clauses.map((clause) => this.evaluateClause(source, clause, scopes));
     logger.debug("engine.filtering", "condition:evaluated", { raw: condition.raw, results, connectors: condition.connectors });
 
-    return condition.connectors.reduce((accumulator, connector, index) => {
+    const finalResult = condition.connectors.reduce((accumulator, connector, index) => {
       const nextResult = results[index + 1];
-      return connector === "AND" ? accumulator && nextResult : accumulator || nextResult;
+      return connector === "AND" ? this.evaluateAnd(accumulator, nextResult) : this.evaluateOr(accumulator, nextResult);
     }, results[0]);
+
+    return finalResult === true;
+  }
+
+  evaluateAnd(left, right) {
+    if (left === false || right === false) return false;
+    if (left === true && right === true) return true;
+    return null; // UNKNOWN
+  }
+
+  evaluateOr(left, right) {
+    if (left === true || right === true) return true;
+    if (left === false && right === false) return false;
+    return null; // UNKNOWN
   }
 
   evaluateClause(source, clause, scopes) {
+    if (clause.kind === "nested") {
+      const res = this.matchesCondition(source, clause.condition, scopes);
+      return res === true ? true : (res === false ? false : null);
+    }
+
     if (clause.operator === "EXISTS" || clause.operator === "NOT EXISTS") {
       const exists = this.resolveExistsSubquery(clause.right, scopes);
       logger.debug("engine.filtering", "clause:exists", { operator: clause.operator, exists });
@@ -1112,18 +1184,45 @@ export class QueryEngine {
 
     const leftValue = this.resolveExpression(source, clause.left, scopes);
 
+    if (clause.operator === "IS NULL") {
+      return leftValue === null || leftValue === undefined;
+    }
+
+    if (clause.operator === "IS NOT NULL") {
+      return leftValue !== null && leftValue !== undefined;
+    }
+
+    if (leftValue === null || leftValue === undefined) {
+      return null; // UNKNOWN
+    }
+
     if (clause.operator === "IN" || clause.operator === "NOT IN") {
       const rightValues = clause.right.kind === "subquery"
         ? this.resolveSubquery(clause.right, scopes, true)
         : this.resolveExpression(source, clause.right, scopes);
+      
+      if (rightValues === null || rightValues === undefined) {
+        return null; // UNKNOWN
+      }
+
       const haystack = Array.isArray(rightValues) ? rightValues : [rightValues];
-      const matched = haystack.some((value) => value == leftValue);
-      logger.debug("engine.filtering", "clause:in", { operator: clause.operator, leftValue, haystackSize: haystack.length, matched });
-      return clause.operator === "IN" ? matched : !matched;
+      const hasNull = haystack.some((value) => value === null || value === undefined);
+      const matched = haystack.some((value) => value !== null && value !== undefined && value == leftValue);
+      
+      if (matched) {
+        return clause.operator === "IN" ? true : false;
+      }
+      if (hasNull) {
+        return null; // UNKNOWN
+      }
+      return clause.operator === "IN" ? false : true;
     }
 
     if (clause.operator === "LIKE" || clause.operator === "NOT LIKE") {
       const rightValue = this.resolveExpression(source, clause.right, scopes);
+      if (rightValue === null || rightValue === undefined) {
+        return null; // UNKNOWN
+      }
       const matched = this.matchesLike(leftValue, rightValue);
       logger.debug("engine.filtering", "clause:like", { operator: clause.operator, leftValue, rightValue, matched });
       return clause.operator === "LIKE" ? matched : !matched;
@@ -1133,17 +1232,14 @@ export class QueryEngine {
       const rightValues = clause.right?.kind === "list"
         ? clause.right.values.map((value) => this.resolveExpression(source, value, scopes))
         : [undefined, undefined];
+      
+      if (rightValues[0] === null || rightValues[0] === undefined || rightValues[1] === null || rightValues[1] === undefined) {
+        return null; // UNKNOWN
+      }
+
       const matched = leftValue >= rightValues[0] && leftValue <= rightValues[1];
       logger.debug("engine.filtering", "clause:between", { operator: clause.operator, leftValue, bounds: rightValues, matched });
       return clause.operator === "BETWEEN" ? matched : !matched;
-    }
-
-    if (clause.operator === "IS NULL") {
-      return leftValue === null || leftValue === undefined;
-    }
-
-    if (clause.operator === "IS NOT NULL") {
-      return leftValue !== null && leftValue !== undefined;
     }
 
     const rightValue = clause.right.kind === "subquery"
@@ -1166,21 +1262,33 @@ export class QueryEngine {
   }
 
   compareValues(left, operator, right) {
+    if (left === null || left === undefined || right === null || right === undefined) {
+      return null;
+    }
+
+    let l = left;
+    let r = right;
+    if (typeof l === "number" && typeof r === "string" && !isNaN(Number(r))) {
+      r = Number(r);
+    } else if (typeof r === "number" && typeof l === "string" && !isNaN(Number(l))) {
+      l = Number(l);
+    }
+
     switch (operator) {
       case "=":
-        return left == right;
+        return l === r;
       case "!=":
-        return left != right;
+        return l !== r;
       case ">":
-        return left > right;
+        return l > r;
       case "<":
-        return left < right;
+        return l < r;
       case ">=":
-        return left >= right;
+        return l >= r;
       case "<=":
-        return left <= right;
+        return l <= r;
       default:
-        return false;
+        return null;
     }
   }
 

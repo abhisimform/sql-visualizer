@@ -1,7 +1,7 @@
 import { DATABASE, QUERY_SCHEMA, SAMPLE_QUERIES } from "../core/data/data.js";
 import { KEYWORDS } from "../config/constants.js";
 import { queryStorage, ThemeStore } from "../services/storage.js";
-import { QueryParser } from "../core/parser/query-parser.js";
+import { QueryParser, getLeafClauses } from "../core/parser/query-parser.js";
 import { QueryEngine } from "../core/engine/query-engine.js";
 import { TableRenderer } from "./renderer/table-renderer.js";
 import { validateQuery } from "../core/validator/query-validator.js";
@@ -99,6 +99,26 @@ export class QueryVisualizerApp {
     });
     this.elements.loadSampleButton?.addEventListener("click", () => {
       this.loadSelectedSampleQuery();
+    });
+
+    document.addEventListener("keydown", (event) => {
+      const isInputFocused = document.activeElement === this.elements.queryInput;
+
+      if (isInputFocused) {
+        if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+          event.preventDefault();
+          this.run();
+        }
+        return;
+      }
+
+      if (event.key === "ArrowRight" || event.key === " ") {
+        event.preventDefault();
+        this.nextStep();
+      } else if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        this.prevStep();
+      }
     });
   }
 
@@ -646,7 +666,7 @@ export class QueryVisualizerApp {
     }
 
     if (step.type === "WHERE" || step.type === "HAVING") {
-      return step.value.clauses.flatMap((clause) => [
+      return getLeafClauses(step.value).flatMap((clause) => [
         ...this.collectSubqueriesFromExpression(clause.left),
         ...this.collectSubqueriesFromExpression(clause.right)
       ]);
@@ -657,7 +677,7 @@ export class QueryVisualizerApp {
     }
 
     if (step.type === "JOIN" && step.value?.condition) {
-      return step.value.condition.clauses.flatMap((clause) => [
+      return getLeafClauses(step.value.condition).flatMap((clause) => [
         ...this.collectSubqueriesFromExpression(clause.left),
         ...this.collectSubqueriesFromExpression(clause.right)
       ]);
@@ -726,7 +746,7 @@ export class QueryVisualizerApp {
     }
 
     if (step.type === "WHERE" || step.type === "HAVING") {
-      return step.value.clauses.some((clause) => (
+      return getLeafClauses(step.value).some((clause) => (
         this.expressionUsesOuterAlias(clause.left, outerAliases, localAliases)
         || this.expressionUsesOuterAlias(clause.right, outerAliases, localAliases)
       ));
@@ -737,7 +757,7 @@ export class QueryVisualizerApp {
     }
 
     if (step.type === "JOIN" && step.value?.condition) {
-      return step.value.condition.clauses.some((clause) => (
+      return getLeafClauses(step.value.condition).some((clause) => (
         this.expressionUsesOuterAlias(clause.left, outerAliases, localAliases)
         || this.expressionUsesOuterAlias(clause.right, outerAliases, localAliases)
       ));

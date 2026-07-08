@@ -337,15 +337,51 @@ FROM (
 ORDER BY sal DESC;
 ```
 
+### 14. Scalar Functions
+
+```sql
+SELECT LOWER(name) AS lower_name, UPPER(city) AS upper_city FROM employees;
+SELECT ROUND(salary / 12, 2) AS monthly_salary FROM employees;
+```
+
+Supported functions:
+- `LOWER(expression)`: Converts string values to lowercase.
+- `UPPER(expression)`: Converts string values to uppercase.
+- `ROUND(expression, decimals)`: Rounds numeric values to specified decimal places (defaults to 0).
+
+### 15. Conditional `CASE WHEN` Projection
+
+```sql
+SELECT name,
+  CASE WHEN salary > 50000 THEN 'High'
+       WHEN salary > 30000 THEN 'Medium'
+       ELSE 'Low'
+  END AS salary_tier
+FROM employees;
+```
+
+Supported:
+- Multi-condition evaluation matching standard SQL precedence (first truthy WHEN clause executes).
+- Optional `ELSE` fallback (returns `NULL` if not specified and no conditions match).
+
+### 16. Parenthesized & Precedent Conditions
+
+```sql
+SELECT * FROM employees WHERE (age > 30 AND city = 'Rajkot') OR salary > 50000;
+```
+
+Supported:
+- Arbitrarily nested parenthesized expressions.
+- Correct operator precedence (AND executes before OR).
+- Full standard SQL Three-Valued Logic (3VL) for comparisons involving `NULL` values (resolving to UNKNOWN/null).
+
 ## Current Limitations
 
 These query types are not supported yet or are only partially supported:
 - `UNION` and `UNION ALL`
-- `CASE WHEN`
 - `INSERT`, `UPDATE`, `DELETE`
 - `CREATE`, `ALTER`, `DROP`
 - window functions
-- nested boolean logic like deeply grouped condition trees
 - multi-column join conditions with advanced boolean grouping
 
 ## Important SQL Rule Reminder
