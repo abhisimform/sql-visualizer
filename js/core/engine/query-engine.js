@@ -932,6 +932,19 @@ export class QueryEngine {
         if (isNaN(val) || isNaN(decimals)) return null;
         return Number(val.toFixed(decimals));
       }
+      case "YEAR":
+        return resolvedArgs[0] ? new Date(resolvedArgs[0]).getFullYear() : null;
+      case "MONTH":
+        return resolvedArgs[0] ? new Date(resolvedArgs[0]).getMonth() + 1 : null;
+      case "DATEDIFF": {
+        if (!resolvedArgs[0] || !resolvedArgs[1]) return null;
+        const d1 = new Date(resolvedArgs[0]);
+        const d2 = new Date(resolvedArgs[1]);
+        const diffTime = d1 - d2;
+        return Math.round(diffTime / (1000 * 60 * 60 * 24));
+      }
+      case "LENGTH":
+        return resolvedArgs[0] !== null && resolvedArgs[0] !== undefined ? String(resolvedArgs[0]).length : null;
       default:
         return null;
     }

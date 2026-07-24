@@ -541,7 +541,7 @@ export class QueryParser {
       }
     }
 
-    const funcMatch = trimmed.match(/^(LOWER|UPPER|ROUND)\((.*?)\)$/i);
+    const funcMatch = trimmed.match(/^(LOWER|UPPER|ROUND|YEAR|MONTH|DATEDIFF|LENGTH)\((.*?)\)$/i);
     if (funcMatch) {
       const fn = funcMatch[1].toUpperCase();
       const args = this.splitTopLevel(funcMatch[2], ",");

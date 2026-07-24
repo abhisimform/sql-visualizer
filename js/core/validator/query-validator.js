@@ -3,7 +3,7 @@ import { getLeafClauses } from "../parser/query-parser.js";
 
 const CLAUSE_SEQUENCE = ["SELECT", "FROM", "WHERE", "GROUP BY", "HAVING", "ORDER BY", "OFFSET", "LIMIT"];
 const BUILT_IN_FUNCTIONS = new Set(["COUNT", "AVG", "SUM", "MAX", "MIN"]);
-const SUPPORTED_SCALAR_FUNCTIONS = new Set(["LOWER", "UPPER", "ROUND"]);
+const SUPPORTED_SCALAR_FUNCTIONS = new Set(["LOWER", "UPPER", "ROUND", "YEAR", "MONTH", "DATEDIFF", "LENGTH"]);
 const PSEUDO_COLUMNS = new Set(["group", "groupkey", "count"]);
 const CONDITION_TYPE_EXEMPT_OPERATORS = new Set(["IN", "NOT IN", "LIKE", "NOT LIKE", "BETWEEN", "NOT BETWEEN", "IS NULL", "IS NOT NULL", "EXISTS", "NOT EXISTS"]);
 const logger = createLogger("Validator");

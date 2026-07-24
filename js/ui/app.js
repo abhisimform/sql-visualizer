@@ -128,6 +128,34 @@ export class QueryVisualizerApp {
     this.renderSelectedSampleInfo();
     this.renderJoinGuidance(this.elements.queryInput.value);
     this.renderErrorLearningPanel();
+    this.renderSchemaSidebar();
+  }
+
+  renderSchemaSidebar() {
+    const container = document.getElementById("schemaSidebarList");
+    if (!container) return;
+
+    let html = "";
+    Object.entries(QUERY_SCHEMA).forEach(([tableName, columns]) => {
+      html += `
+        <div class="schema-table-card">
+          <div class="schema-table-header" onclick="this.parentElement.classList.toggle('is-expanded')">
+            <span class="schema-table-icon">▶</span>
+            <span class="schema-table-name">${tableName}</span>
+            <span class="schema-table-badge">${columns.length} cols</span>
+          </div>
+          <div class="schema-table-columns">
+            ${columns.map((col) => `
+              <div class="schema-column-item">
+                <span class="schema-column-bullet">🔹</span>
+                <span class="schema-column-name">${col}</span>
+              </div>
+            `).join("")}
+          </div>
+        </div>
+      `;
+    });
+    container.innerHTML = html;
   }
 
   populateSampleQueryOptions() {

@@ -342,12 +342,18 @@ ORDER BY sal DESC;
 ```sql
 SELECT LOWER(name) AS lower_name, UPPER(city) AS upper_city FROM employees;
 SELECT ROUND(salary / 12, 2) AS monthly_salary FROM employees;
+SELECT YEAR(hire_date) AS hire_year, MONTH(order_date) AS order_month FROM employees;
+SELECT DATEDIFF(valid_to, valid_from) AS duration, LENGTH(name) AS len FROM coupons;
 ```
 
 Supported functions:
 - `LOWER(expression)`: Converts string values to lowercase.
 - `UPPER(expression)`: Converts string values to uppercase.
 - `ROUND(expression, decimals)`: Rounds numeric values to specified decimal places (defaults to 0).
+- `YEAR(expression)`: Extracts the four-digit year from date values.
+- `MONTH(expression)`: Extracts the numeric month (1-12) from date values.
+- `DATEDIFF(end_date, start_date)`: Calculates difference in days between two date values.
+- `LENGTH(expression)`: Calculates character length of string values.
 
 ### 15. Conditional `CASE WHEN` Projection
 

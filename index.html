@@ -4,120 +4,161 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SQL Execution Visualizer</title>
+  <title>SQL Visual Playground</title>
   <script>
     const savedTheme = localStorage.getItem("sql-visualizer-theme");
     if (savedTheme === "light" || savedTheme === "dark") {
       document.documentElement.dataset.theme = savedTheme;
     }
   </script>
+  
+  <!-- Premium Typography -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  
   <link rel="stylesheet" href="css/style.css">
 </head>
 
 <body>
-  <main class="page-shell">
-    <section class="hero-card">
-      <div class="hero-topbar">
-        <div>
-          <p class="eyebrow">Interactive playground</p>
-          <h1>SQL Execution Visualizer</h1>
-          <p class="hero-copy">Step through how a simple SQL query transforms your dataset in memory.</p>
-        </div>
+  <!-- Mesh Grid overlay -->
+  <div class="mesh-overlay" aria-hidden="true"></div>
 
-        <button id="themeToggle" class="theme-toggle" type="button">
-          <span class="theme-toggle-mark" aria-hidden="true"></span>
-          <span id="themeLabel">Dark mode</span>
-        </button>
-      </div>
-    </section>
+  <!-- Main Navigation Bar -->
+  <header class="navbar">
+    <div class="nav-logo">
+      <div class="logo-dot"></div>
+      <span class="logo-title">SQL Visualizer</span>
+    </div>
+    
+    <nav class="nav-links">
+      <a href="index.html" class="nav-item active">Playground</a>
+      <a href="database.html" class="nav-item">Browse Database</a>
+    </nav>
+    
+    <div class="nav-actions">
+      <button id="themeToggle" class="theme-btn" type="button" aria-label="Toggle light/dark mode">
+        <span class="theme-btn-dot"></span>
+        <span id="themeLabel">Dark mode</span>
+      </button>
+    </div>
+  </header>
 
-    <section class="workspace-grid">
-      <section class="panel panel-editor">
-        <div class="panel-heading">
-          <h2>Query</h2>
-          <span class="panel-badge">Saved locally</span>
-        </div>
-
-        <textarea id="queryInput" rows="5">SELECT * FROM employees</textarea>
-
-        <div class="action-row">
-          <button id="runButton" class="button button-primary" type="button">Run Query</button>
-          <p id="stepLabel" class="step-label">Ready to execute.</p>
-        </div>
-
-        <div class="query-card">
-          <div class="panel-heading compact">
-            <h3>Execution order</h3>
+  <!-- Large View Playground layout -->
+  <main class="playground-layout">
+    <!-- Top Row: Editor & Stepper (Side-by-Side) -->
+    <section class="top-editor-grid">
+      <!-- Left Column: SQL Editor Card -->
+      <div class="card editor-card">
+        <div class="card-title-row">
+          <div class="card-status-info">
+            <span class="status-indicator-dot"></span>
+            <h3>SQL Query Editor</h3>
           </div>
+          <div class="keyboard-hud-tip">
+            <span class="key-badge">Ctrl</span> + <span class="key-badge">Enter</span> to run
+          </div>
+        </div>
+
+        <div class="editor-outer-frame">
+          <div class="editor-line-gutters">
+            <span>1</span>
+            <span>2</span>
+            <span>3</span>
+            <span>4</span>
+            <span>5</span>
+          </div>
+          <textarea id="queryInput" spellcheck="false" placeholder="Write your SQL query here...">SELECT * FROM employees</textarea>
+        </div>
+
+        <div class="editor-actions-footer">
+          <button id="runButton" class="btn btn-primary" type="button">Run Query</button>
+          <div class="status-indicator-pill">
+            <p id="stepLabel" class="status-text">Ready to execute.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Column: Walkthrough Timeline Controller Card -->
+      <div class="card stepper-card">
+        <div class="card-title-row">
+          <h3>Execution Pipeline Stepper</h3>
+          <button id="animationToggle" class="btn btn-toggle" type="button" aria-pressed="true">Animation: On</button>
+        </div>
+
+        <div class="stepper-timeline-track">
           <div class="query" id="queryDisplay"></div>
         </div>
 
-        <div class="nav-row">
-          <button id="animationToggle" class="button button-secondary" type="button" aria-pressed="true">Animation: On</button>
-          <button id="prevButton" class="button button-secondary" type="button">Previous Step</button>
-          <button id="nextButton" class="button button-secondary" type="button">Next Step</button>
+        <div class="stepper-controls-row">
+          <button id="prevButton" class="btn btn-secondary" type="button">Previous Step</button>
+          <button id="nextButton" class="btn btn-primary" type="button">Next Step</button>
         </div>
+      </div>
+    </section>
 
-        <details class="info-section" open>
-          <summary>Sample Queries</summary>
-          <div class="info-section-body">
-            <div class="sample-query-controls">
-              <label class="field-label" for="sampleQuerySelect">Choose a sample query</label>
-              <select id="sampleQuerySelect" class="metadata-select">
-                <option value="">Select a sample query</option>
-              </select>
-            </div>
-
-            <div class="sample-query-actions">
-              <button id="loadSampleButton" class="button button-secondary" type="button">Load Sample</button>
-            </div>
-
-            <div id="sampleQueryInfo" class="metadata-host" aria-live="polite"></div>
+    <!-- Middle Row: Interactive Results Stage (Full Width) -->
+    <section class="results-section panel-results">
+      <div class="card results-card">
+        <div class="card-title-row">
+          <div class="card-status-info">
+            <span class="results-tag-bullet"></span>
+            <h3>Interactive Results Stage</h3>
           </div>
-        </details>
-
-        <details class="info-section">
-          <summary>Join Guidance</summary>
-          <div class="info-section-body">
-            <div id="joinGuidancePanel" class="metadata-host" aria-live="polite"></div>
-          </div>
-        </details>
-
-        <details class="info-section">
-          <summary>Common SQL Mistakes</summary>
-          <div class="info-section-body">
-            <div id="errorLearningPanel" class="metadata-host" aria-live="polite"></div>
-          </div>
-        </details>
-      </section>
-
-      <section class="panel panel-results">
-        <div class="panel-heading">
-          <h2>Current Dataset</h2>
-          <div class="results-tools">
-            <span id="rowCount" class="panel-badge">Rows: 0</span>
-            <button id="copyDataButton" class="button button-secondary button-copy" type="button" aria-label="Copy current table data" title="Copy current table data">
-              <span class="button-copy-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" focusable="false">
-                  <path d="M9 9a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-7a2 2 0 0 1-2-2V9Zm-4 6V6a2 2 0 0 1 2-2h7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-              </span>
+          <div class="results-tools-row">
+            <span id="rowCount" class="results-badge">Rows: 0</span>
+            <button id="copyDataButton" class="btn btn-secondary btn-copy-icon" type="button" aria-label="Copy table data" title="Copy table data">
+              <svg viewBox="0 0 24 24" class="copy-svg-icon">
+                <path d="M9 9a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-7a2 2 0 0 1-2-2V9Zm-4 6V6a2 2 0 0 1 2-2h7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
             </button>
           </div>
         </div>
 
-        <div class="table-shell">
-          <div id="table" class="table-host"></div>
+        <div class="results-table-outer">
+          <div id="table" class="table-render-host"></div>
         </div>
-      </section>
+      </div>
+    </section>
+
+    <!-- Bottom Row: Help Accordions (3 columns) -->
+    <section class="guidance-grid">
+      <!-- Accordion 1: Preset Queries -->
+      <details class="accordion-panel" open>
+        <summary>Sample Queries</summary>
+        <div class="accordion-body">
+          <div class="input-field-group">
+            <label for="sampleQuerySelect">Preset SQL Queries</label>
+            <select id="sampleQuerySelect" class="styled-select-input">
+              <option value="">Choose a query template</option>
+            </select>
+          </div>
+          <div class="flex-actions-end">
+            <button id="loadSampleButton" class="btn btn-secondary" type="button">Load Selected Query</button>
+          </div>
+          <div id="sampleQueryInfo" class="metadata-render-target" aria-live="polite"></div>
+        </div>
+      </details>
+
+      <!-- Accordion 2: Join Guidance -->
+      <details class="accordion-panel">
+        <summary>Join Guidance</summary>
+        <div class="accordion-body">
+          <div id="joinGuidancePanel" class="metadata-render-target" aria-live="polite"></div>
+        </div>
+      </details>
+
+      <!-- Accordion 3: SQL Mistakes -->
+      <details class="accordion-panel">
+        <summary>Common SQL Mistakes</summary>
+        <div class="accordion-body">
+          <div id="errorLearningPanel" class="metadata-render-target" aria-live="polite"></div>
+        </div>
+      </details>
     </section>
   </main>
 
   <script type="module" src="js/main.js"></script>
-  <script>
-    const gym = localStorage.getItem('gym');
-    console.log(gym);
-  </script>
 </body>
 
 </html>

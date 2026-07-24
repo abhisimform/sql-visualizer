@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SQL Execution Visualizer</title>
+  <script>
+    const savedTheme = localStorage.getItem("sql-visualizer-theme");
+    if (savedTheme === "light" || savedTheme === "dark") {
+      document.documentElement.dataset.theme = savedTheme;
+    }
+  </script>
+  
+  <!-- Modern Typography Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  
+  <link rel="stylesheet" href="css/style.css">
+</head>
+
+<body>
+  <!-- Clean background mesh -->
+  <div class="mesh-background" aria-hidden="true"></div>
+
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-logo">
+      <span class="logo-mark"></span>
+      <div class="logo-text">
+        <span class="logo-title">SQL Execution Visualizer</span>
+        <span class="logo-tag">Engine v1.2</span>
+      </div>
+    </div>
+    
+    <div class="header-actions">
+      <button id="themeToggle" class="theme-toggle" type="button" aria-label="Toggle theme">
+        <span class="theme-toggle-icon"></span>
+        <span id="themeLabel">Dark</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Dashboard Workspace -->
+  <main class="dashboard-workspace">
+    <!-- Left Sidebar: Database Explorer -->
+    <aside class="sidebar-panel">
+      <div class="sidebar-header">
+        <span class="sidebar-icon">📊</span>
+        <h3>Database Explorer</h3>
+      </div>
+      <div class="schema-container">
+        <div id="schemaSidebarList" class="schema-list"></div>
+      </div>
+    </aside>
+
+    <!-- Center Section: Query Builder & Step Walkthrough -->
+    <section class="center-stage">
+      <!-- SQL Code Card -->
+      <div class="stage-card editor-card">
+        <div class="card-header">
+          <div class="header-info">
+            <span class="status-indicator"></span>
+            <h4>SQL Query Editor</h4>
+          </div>
+          <div class="keyboard-tips">
+            <span class="key-badge">Ctrl</span> + <span class="key-badge">Enter</span> to run
+          </div>
+        </div>
+
+        <div class="editor-viewport">
+          <div class="editor-gutter-numbers">
+            <span>1</span>
+            <span>2</span>
+            <span>3</span>
+            <span>4</span>
+            <span>5</span>
+          </div>
+          <textarea id="queryInput" spellcheck="false">SELECT * FROM employees</textarea>
+        </div>
+
+        <div class="editor-footer">
+          <button id="runButton" class="btn btn-primary" type="button">Run Query</button>
+          <div class="status-msg-container">
+            <p id="stepLabel" class="status-msg">Ready to execute.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stepper Controller Card -->
+      <div class="stage-card stepper-card">
+        <div class="card-header">
+          <h4>Execution Stepper</h4>
+          <button id="animationToggle" class="btn btn-icon-toggle" type="button" aria-pressed="true">Animation: On</button>
+        </div>
+
+        <div class="timeline-container">
+          <div class="query" id="queryDisplay"></div>
+        </div>
+
+        <div class="stepper-actions">
+          <button id="prevButton" class="btn btn-secondary" type="button">Previous Step</button>
+          <button id="nextButton" class="btn btn-primary" type="button">Next Step</button>
+        </div>
+      </div>
+
+      <!-- Accordion Guidance Panel -->
+      <div class="guidance-panel">
+        <details class="accordion-item" open>
+          <summary>Sample Queries</summary>
+          <div class="accordion-content">
+            <div class="control-group">
+              <label for="sampleQuerySelect">Preset Queries</label>
+              <select id="sampleQuerySelect" class="styled-select">
+                <option value="">Choose a sample query</option>
+              </select>
+            </div>
+            <div class="button-row">
+              <button id="loadSampleButton" class="btn btn-secondary" type="button">Load Sample</button>
+            </div>
+            <div id="sampleQueryInfo" class="metadata-output" aria-live="polite"></div>
+          </div>
+        </details>
+
+        <details class="accordion-item">
+          <summary>Join Guidance</summary>
+          <div class="accordion-content">
+            <div id="joinGuidancePanel" class="metadata-output" aria-live="polite"></div>
+          </div>
+        </details>
+
+        <details class="accordion-item">
+          <summary>Common SQL Mistakes</summary>
+          <div class="accordion-content">
+            <div id="errorLearningPanel" class="metadata-output" aria-live="polite"></div>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <!-- Right Section: Results panel -->
+    <section class="results-stage panel-results">
+      <div class="stage-card results-card">
+        <div class="card-header">
+          <div class="header-info">
+            <span class="results-bullet"></span>
+            <h4>Interactive Dataset Viewer</h4>
+          </div>
+          <div class="results-actions">
+            <span id="rowCount" class="badge">Rows: 0</span>
+            <button id="copyDataButton" class="btn btn-secondary btn-copy" type="button" aria-label="Copy table data" title="Copy table data">
+              <svg viewBox="0 0 24 24" focusable="false" class="copy-svg">
+                <path d="M9 9a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-7a2 2 0 0 1-2-2V9Zm-4 6V6a2 2 0 0 1 2-2h7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="table-container">
+          <div id="table" class="table-target"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+
+</html>
